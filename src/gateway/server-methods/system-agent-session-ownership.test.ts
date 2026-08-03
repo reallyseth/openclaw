@@ -49,6 +49,7 @@ type FakeEngine = {
   seedHistory: ReturnType<typeof vi.fn>;
   historyLength: ReturnType<typeof vi.fn>;
   historySince: ReturnType<typeof vi.fn>;
+  getActiveWizardStep: ReturnType<typeof vi.fn>;
   getPendingOperatorProposal: ReturnType<typeof vi.fn>;
   resolveOperatorApproval: ReturnType<typeof vi.fn>;
   dispose: ReturnType<typeof vi.fn>;
@@ -68,6 +69,7 @@ function makeEngine(): FakeEngine {
     seedHistory: vi.fn(),
     historyLength: vi.fn(() => 0),
     historySince: vi.fn(() => []),
+    getActiveWizardStep: vi.fn(() => null),
     getPendingOperatorProposal: vi.fn(() => null),
     resolveOperatorApproval: vi.fn(async () => null),
     dispose: vi.fn(async () => undefined),
@@ -147,6 +149,20 @@ async function callChat(
     respond,
   } as never);
   return expectDefined(calls[0], "system-agent response");
+}
+
+async function callHistory(
+  context: GatewayRequestContext,
+  params: Record<string, unknown>,
+  client: GatewayClient | null = defaultClient,
+): Promise<RespondCall> {
+  const calls: RespondCall[] = [];
+  const respond: RespondFn = (ok, payload, error) => calls.push({ ok, payload, error });
+  await expectDefined(
+    systemAgentHandlers["openclaw.chat.history"],
+    'systemAgentHandlers["openclaw.chat.history"] test invariant',
+  )({ params, client, context, respond } as never);
+  return expectDefined(calls[0], "system-agent history response");
 }
 
 beforeEach(() => {
@@ -314,6 +330,38 @@ describe("openclaw.chat session ownership", () => {
 });
 
 describe("openclaw.chat session responses", () => {
+  it("returns a live wizard snapshot only to the exact session owner", async () => {
+    const engine = makeEngine();
+    engine.getActiveWizardStep.mockReturnValue({
+      id: "secret",
+      type: "text",
+      message: "Twitch secret",
+      sensitive: true,
+    });
+    const sessions = new Map<string, SystemAgentChatSession>([
+      ["s1", seededSession({ engine, ownerKey: "device:device-owner" })],
+    ]);
+    const context = makeContext(sessions);
+
+    const owner = await callHistory(
+      context,
+      { sessionId: "s1" },
+      makeClient({ connId: "owner", deviceId: "device-owner" }),
+    );
+    expect(owner).toMatchObject({
+      ok: true,
+      payload: { session: { sessionId: "s1", step: { id: "secret", sensitive: true } } },
+    });
+
+    const foreign = await callHistory(
+      context,
+      { sessionId: "s1" },
+      makeClient({ connId: "other", deviceId: "device-other" }),
+    );
+    expect(foreign).toMatchObject({ ok: true, payload: { turns: [] } });
+    expect((foreign.payload as { session?: unknown }).session).toBeUndefined();
+  });
+
   it("returns the stored welcome when no message is sent", async () => {
     const sessions = new Map<string, SystemAgentChatSession>([["s1", seededSession()]]);
     const call = await callChat(makeContext(sessions), { sessionId: "s1" });

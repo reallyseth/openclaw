@@ -274,7 +274,7 @@ export const systemAgentHandlers: GatewayRequestHandlers = {
       undefined,
     );
   },
-  "openclaw.chat.history": ({ params, respond }) => {
+  "openclaw.chat.history": ({ params, respond, client, context }) => {
     if (
       !assertValidParams(
         params,
@@ -285,11 +285,26 @@ export const systemAgentHandlers: GatewayRequestHandlers = {
     ) {
       return;
     }
-    respond(
-      true,
-      { turns: readTranscriptTail(params.limit ?? DEFAULT_SYSTEM_AGENT_HISTORY_LIMIT) },
-      undefined,
-    );
+    const requestedSessionId = params.sessionId;
+    const liveSession = requestedSessionId
+      ? context.systemAgentSessions.get(requestedSessionId)
+      : null;
+    const ownerKey = requestedSessionId ? resolveSystemAgentSessionOwnerKey({ client }) : undefined;
+    const activeStep =
+      liveSession && ownerKey && liveSession.ownerKey === ownerKey
+        ? liveSession.engine.getActiveWizardStep()
+        : null;
+    const session =
+      liveSession && ownerKey && requestedSessionId && liveSession.ownerKey === ownerKey
+        ? {
+            sessionId: requestedSessionId,
+            ...(activeStep ? { step: activeStep } : {}),
+          }
+        : undefined;
+    respond(true, {
+      turns: readTranscriptTail(params.limit ?? DEFAULT_SYSTEM_AGENT_HISTORY_LIMIT),
+      ...(session ? { session } : {}),
+    });
   },
   /** Structured onboarding: list reusable AI access on this host. */
   "openclaw.setup.detect": async ({ params, respond }) => {

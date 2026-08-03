@@ -108,6 +108,8 @@ export const SystemAgentChatResultSchema = closedObject({
 
 export const SystemAgentChatHistoryParamsSchema = closedObject({
   limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 500, default: 100 })),
+  /** Exact live session to resume after a browser reload. */
+  sessionId: Type.Optional(NonEmptyString),
 });
 
 export const SystemAgentChatHistoryTurnSchema = closedObject({
@@ -118,6 +120,13 @@ export const SystemAgentChatHistoryTurnSchema = closedObject({
 
 export const SystemAgentChatHistoryResultSchema = closedObject({
   turns: Type.Array(SystemAgentChatHistoryTurnSchema),
+  /** Owner-validated live state; omitted when the exact session is unavailable. */
+  session: Type.Optional(
+    closedObject({
+      sessionId: NonEmptyString,
+      step: Type.Optional(WizardStepSchema),
+    }),
+  ),
 });
 
 export const SystemChangeKindSchema = Type.Union([

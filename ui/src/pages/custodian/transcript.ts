@@ -86,17 +86,16 @@ function toCustodianMessageGroup(message: CustodianMessage): MessageGroup {
 
 export async function readCustodianTranscript(
   client: GatewayBrowserClient,
-): Promise<SystemAgentChatHistoryResult["turns"] | null> {
+  sessionId?: string,
+): Promise<SystemAgentChatHistoryResult | null> {
   try {
-    return (
-      await client.request<SystemAgentChatHistoryResult>(
-        "openclaw.chat.history",
-        {},
-        {
-          timeoutMs: CUSTODIAN_TRANSCRIPT_TIMEOUT_MS,
-        },
-      )
-    ).turns;
+    return await client.request<SystemAgentChatHistoryResult>(
+      "openclaw.chat.history",
+      sessionId ? { sessionId } : {},
+      {
+        timeoutMs: CUSTODIAN_TRANSCRIPT_TIMEOUT_MS,
+      },
+    );
   } catch {
     return null;
   }

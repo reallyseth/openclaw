@@ -3514,17 +3514,24 @@ describe("OpenClaw chat wizard step payload", () => {
       planWithAssistant: async () => null,
       deps: { loadOverview: fakeOverviewLoader() },
       runChannelSetupWizard: async (_channel: string, prompter: WizardPrompter) => {
-        await prompter.text({ message: "Bot token", sensitive: true });
+        await prompter.text({
+          message: "Bot token",
+          sensitive: true,
+          initialValue: "must-not-leave-server",
+        });
       },
     });
 
     const prompt = await engine.handle("connect telegram");
     const stepId = expectDefined(prompt.step?.id, "expected an active wizard step");
+    expect(engine.getActiveWizardStep()).toMatchObject({ id: stepId, sensitive: true });
+    expect(engine.getActiveWizardStep()).not.toHaveProperty("initialValue");
     const cancelled = await engine.cancelWizard({ stepId });
 
     expect(cancelled.text).toContain("setup cancelled");
     expect(cancelled.wizardInputPending).toBeUndefined();
     expect(cancelled.step).toBeUndefined();
+    expect(engine.getActiveWizardStep()).toBeNull();
     expect(runAgentTurn).not.toHaveBeenCalled();
     expect(engine.historySince(0)).toContainEqual({ role: "user", text: "Cancel setup" });
   });

@@ -18,6 +18,11 @@ import {
   isCustodianSessionInvalidatedError,
   type CustodianSessionVariant,
 } from "./session-lifecycle.ts";
+import {
+  clearCustodianSessionPointer,
+  readCustodianSessionPointer,
+  writeCustodianSessionPointer,
+} from "./session-pointer.ts";
 import { parseCustodianQuestion, type CustodianStructuredQuestion } from "./structured-question.ts";
 import {
   createCustodianSessionId,
@@ -76,6 +81,7 @@ export class CustodianSessionStore {
   private sessionClient: GatewayBrowserClient | null = null;
   private sessionOwnershipKey: string | null = null;
   private sessionStarted = false;
+  private sessionRestorePending = false;
   private lastHelloDeviceToken = "";
   private configuredInferenceState: ConfiguredInferenceState = "unresolved";
   private eventNudgeClosed = false;
@@ -375,7 +381,14 @@ export class CustodianSessionStore {
     variant: CustodianSessionVariant,
     loadTranscript: boolean,
   ): void {
-    this.sessionId = createCustodianSessionId();
+    const gatewayUrl = this.context?.gateway.connection.gatewayUrl ?? "";
+    const historySupported =
+      this.context &&
+      isGatewayMethodAdvertised(this.context.gateway.snapshot, "openclaw.chat.history") === true;
+    const storedSessionId =
+      loadTranscript && historySupported ? readCustodianSessionPointer(gatewayUrl, variant) : null;
+    this.sessionId = storedSessionId ?? createCustodianSessionId();
+    this.sessionRestorePending = storedSessionId !== null;
     this.sessionVariant = variant;
     this.sessionClient = client;
     this.sessionOwnershipKey = this.currentSessionOwnershipKey();
@@ -409,6 +422,7 @@ export class CustodianSessionStore {
     this.error = null;
     this.setupIssue = null;
     this.earlierBoundaryAfterId = this.messages.at(-1)?.id ?? null;
+    clearCustodianSessionPointer(this.context?.gateway.connection.gatewayUrl ?? "", variant);
     this.startSession(client, variant, false);
   }
 
@@ -533,40 +547,94 @@ export class CustodianSessionStore {
     params: SystemAgentChatParams,
     loadTranscript = true,
   ): Promise<void> {
+    let requestParams = params;
     const epoch = ++this.requestEpoch;
     this.sending = true;
     this.error = null;
     this.retryParams = params;
     this.emit();
     if (loadTranscript) {
-      await this.refreshTranscriptHistory(client, epoch);
+      const restored = await this.refreshTranscriptHistory(client, epoch);
+      if (restored) {
+        if (epoch === this.requestEpoch && client === this.activeClient) {
+          this.sending = false;
+          this.retryParams = null;
+          this.emit();
+        }
+        return;
+      }
+      if (this.sessionRestorePending === false && params.sessionId !== this.sessionId) {
+        requestParams = { ...params, sessionId: this.sessionId };
+        this.retryParams = requestParams;
+      }
     }
     if (epoch !== this.requestEpoch || client !== this.activeClient) {
       return;
     }
-    await this.requestReply(client, params);
+    await this.requestReply(client, requestParams);
   }
 
   private async refreshTranscriptHistory(
     client: GatewayBrowserClient,
     epoch: number,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const context = this.context;
     if (
       !context ||
       isGatewayMethodAdvertised(context.gateway.snapshot, "openclaw.chat.history") !== true
     ) {
-      return;
+      return false;
     }
-    const turns = await readCustodianTranscript(client);
-    if (turns === null || epoch !== this.requestEpoch || client !== this.activeClient) {
-      return;
+    const history = await readCustodianTranscript(
+      client,
+      this.sessionRestorePending ? this.sessionId : undefined,
+    );
+    if (epoch !== this.requestEpoch || client !== this.activeClient) {
+      return false;
     }
-    const transcript = createCustodianTranscriptMessages(turns, this.nextMessageId);
+    if (history === null) {
+      if (this.sessionRestorePending) {
+        clearCustodianSessionPointer(context.gateway.connection.gatewayUrl, this.variant);
+        this.sessionId = createCustodianSessionId();
+        this.sessionRestorePending = false;
+      }
+      return false;
+    }
+    const transcript = createCustodianTranscriptMessages(history.turns, this.nextMessageId);
     this.messages = transcript.messages;
     this.nextMessageId = transcript.nextMessageId;
     this.earlierBoundaryAfterId = this.messages.at(-1)?.id ?? null;
+    if (this.sessionRestorePending) {
+      this.sessionRestorePending = false;
+      if (history.session?.sessionId !== this.sessionId) {
+        const gatewayUrl = this.context?.gateway.connection.gatewayUrl ?? "";
+        clearCustodianSessionPointer(gatewayUrl, this.variant);
+        this.sessionId = createCustodianSessionId();
+        this.emit();
+        return false;
+      }
+      const step = history.session.step ?? null;
+      if (step) {
+        const lastAssistantIndex = this.messages.findLastIndex(
+          (message) => message.role === "assistant",
+        );
+        if (lastAssistantIndex === -1) {
+          this.appendAssistant("", null, step);
+        } else {
+          this.messages = this.messages.map((message, index) =>
+            index === lastAssistantIndex ? { ...message, step } : message,
+          );
+        }
+      }
+      this.sensitive = step?.sensitive === true;
+      this.wizardInputPending = step !== null;
+      this.wizardValue = step ? initialCustodianWizardValue(step) : undefined;
+      this.wizardSecretVisible = false;
+      this.emit();
+      return true;
+    }
     this.emit();
+    return false;
   }
 
   private clearConversation(): void {
@@ -628,6 +696,11 @@ export class CustodianSessionStore {
         return "sent";
       }
       this.sessionId = result.sessionId;
+      writeCustodianSessionPointer(
+        context.gateway.connection.gatewayUrl,
+        this.variant,
+        result.sessionId,
+      );
       this.sensitive = result.sensitive === true;
       this.wizardInputPending = result.wizardInputPending === true;
       this.retryParams = null;
