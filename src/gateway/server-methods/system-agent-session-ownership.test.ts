@@ -3,7 +3,10 @@
 import { expectDefined } from "@openclaw/normalization-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetCommandQueueStateForTest } from "../../process/command-queue.test-support.js";
-import { SystemAgentWizardAnswerError } from "../../system-agent/chat-engine.js";
+import {
+  SystemAgentWizardAnswerError,
+  SystemAgentWizardCancelError,
+} from "../../system-agent/chat-engine.js";
 import { systemAgentHandlers, type SystemAgentChatSession } from "./system-agent.js";
 import type { GatewayClient, GatewayRequestContext, RespondFn } from "./types.js";
 
@@ -41,6 +44,7 @@ vi.mock("../../system-agent/greeting.js", () => ({
 
 type FakeEngine = {
   answerWizard: ReturnType<typeof vi.fn>;
+  cancelWizard: ReturnType<typeof vi.fn>;
   handle: ReturnType<typeof vi.fn>;
   seedHistory: ReturnType<typeof vi.fn>;
   historyLength: ReturnType<typeof vi.fn>;
@@ -56,6 +60,9 @@ function makeEngine(): FakeEngine {
   return {
     answerWizard: vi.fn(async () => {
       throw new SystemAgentWizardAnswerError("No hosted wizard is awaiting an answer.");
+    }),
+    cancelWizard: vi.fn(async () => {
+      throw new SystemAgentWizardCancelError("No hosted wizard is awaiting cancellation.");
     }),
     handle: vi.fn(async () => ({ text: "did the thing", action: "none" })),
     seedHistory: vi.fn(),
@@ -73,8 +80,10 @@ const createdEngines = vi.hoisted(() => [] as FakeEngine[]);
 
 vi.mock("../../system-agent/chat-engine.js", () => {
   class FakeSystemAgentWizardAnswerError extends Error {}
+  class FakeSystemAgentWizardCancelError extends Error {}
   return {
     SystemAgentWizardAnswerError: FakeSystemAgentWizardAnswerError,
+    SystemAgentWizardCancelError: FakeSystemAgentWizardCancelError,
     SystemAgentChatEngine: function FakeSystemAgentChatEngine(this: FakeEngine) {
       const engine = makeEngine();
       createdEngines.push(engine);
@@ -339,6 +348,47 @@ describe("openclaw.chat session responses", () => {
       },
     });
     expect(setupInferenceMocks.verifySetupInference).not.toHaveBeenCalled();
+  });
+
+  it("rejects a typed cancellation without an active chat session", async () => {
+    const call = await callChat(makeContext(new Map()), {
+      sessionId: "missing",
+      wizardCancel: { stepId: "channel" },
+    });
+
+    expect(call).toMatchObject({
+      ok: false,
+      error: {
+        code: "INVALID_REQUEST",
+        details: { code: "system_agent_session_invalidated" },
+      },
+    });
+    expect(setupInferenceMocks.verifySetupInference).not.toHaveBeenCalled();
+  });
+
+  it("routes typed cancellation only for the session owner", async () => {
+    const engine = makeEngine();
+    engine.cancelWizard.mockResolvedValue({ text: "Twitch setup cancelled.", action: "none" });
+    const sessions = new Map<string, SystemAgentChatSession>([
+      ["s1", seededSession({ engine, ownerKey: "device:device-owner" })],
+    ]);
+    const context = makeContext(sessions);
+
+    const rejected = await callChat(
+      context,
+      { sessionId: "s1", wizardCancel: { stepId: "channel" } },
+      makeClient({ connId: "other", deviceId: "device-other" }),
+    );
+    expect(rejected).toMatchObject({ ok: false, error: { code: "INVALID_REQUEST" } });
+    expect(engine.cancelWizard).not.toHaveBeenCalled();
+
+    const accepted = await callChat(
+      context,
+      { sessionId: "s1", wizardCancel: { stepId: "channel" } },
+      makeClient({ connId: "owner", deviceId: "device-owner" }),
+    );
+    expect(accepted).toMatchObject({ ok: true, payload: { reply: "Twitch setup cancelled." } });
+    expect(engine.cancelWizard).toHaveBeenCalledWith({ stepId: "channel" });
   });
 
   it("rejects a structured answer when the active session has no hosted wizard", async () => {

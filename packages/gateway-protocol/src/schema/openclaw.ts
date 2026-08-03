@@ -5,6 +5,10 @@ import { closedObject } from "./closed-object.js";
 import { NonEmptyString } from "./primitives.js";
 import { WizardAnswerSchema, WizardStartResultSchema, WizardStepSchema } from "./wizard.js";
 
+const SystemAgentWizardCancelSchema = closedObject({
+  stepId: NonEmptyString,
+});
+
 /**
  * OpenClaw chat lets clients (macOS app onboarding, future UIs) hold the
  * setup/repair conversation over the gateway. The gateway live-tests the
@@ -17,6 +21,8 @@ export const SystemAgentChatParamsSchema = closedObject({
   message: Type.Optional(Type.String()),
   /** Typed answer from a client rendering the current `WizardStep`. */
   wizardAnswer: Type.Optional(WizardAnswerSchema),
+  /** Typed cancellation bound to the client-rendered current `WizardStep`. */
+  wizardCancel: Type.Optional(SystemAgentWizardCancelSchema),
   /** Seeds a purpose-specific first greeting for a fresh conversation. */
   welcomeVariant: Type.Optional(
     Type.Union([Type.Literal("onboarding"), Type.Literal("new-agent")]),

@@ -138,6 +138,7 @@ describe("custodian page", () => {
     await waitForFast(() =>
       expect(page.querySelectorAll('.custodian__wizard-step input[type="radio"]')).toHaveLength(5),
     );
+    expect(page.querySelector(".custodian__wizard-cancel")).not.toBeNull();
     expect(page.querySelector("openclaw-option-card")).toBeNull();
     expect(page.querySelector(".agent-chat__composer-shell")).toBeNull();
     page
@@ -152,6 +153,7 @@ describe("custodian page", () => {
         3,
       ),
     );
+    expect(page.querySelector(".custodian__wizard-cancel")).not.toBeNull();
     expect(request.mock.calls[1]?.[1]).toMatchObject({
       wizardAnswer: { stepId: "channel", value: "twitch" },
     });
@@ -176,6 +178,7 @@ describe("custodian page", () => {
       wizardAnswer: { stepId: "features", value: ["chat", "announcements"] },
     });
     expect(secretInput.type).toBe("password");
+    expect(page.querySelector(".custodian__wizard-cancel")).not.toBeNull();
     const revealSecret = page.querySelector<HTMLButtonElement>(
       '.custodian__wizard-step button[aria-label="Reveal value"]',
     );
@@ -200,6 +203,47 @@ describe("custodian page", () => {
     expect(page.textContent).toContain("Sensitive reply sent");
     expect(page.textContent).not.toContain("fake-client-secret");
     expect(page.querySelector(".agent-chat__composer-shell")).not.toBeNull();
+  });
+
+  it("cancels the exact active wizard through the typed control", async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce({
+        sessionId: "cancel-wizard-session",
+        reply: "Enter the secret.",
+        action: "none",
+        sensitive: true,
+        wizardInputPending: true,
+        step: {
+          id: "secret",
+          type: "text",
+          message: "Twitch client secret",
+          sensitive: true,
+        },
+      })
+      .mockResolvedValueOnce({
+        sessionId: "cancel-wizard-session",
+        reply: "Twitch setup cancelled. Nothing was changed beyond completed steps.",
+        action: "none",
+      });
+    const { context } = createContext(request);
+    const { page } = await mountPage(context);
+
+    const cancel = await waitForFast(() => {
+      const button = page.querySelector<HTMLButtonElement>(".custodian__wizard-cancel");
+      expect(button).not.toBeNull();
+      return button!;
+    });
+    cancel.click();
+
+    await waitForFast(() => expect(request).toHaveBeenCalledTimes(2));
+    expect(request.mock.calls[1]?.[1]).toEqual({
+      sessionId: "cancel-wizard-session",
+      wizardCancel: { stepId: "secret" },
+    });
+    await waitForFast(() => expect(page.querySelector(".custodian__wizard-step")).toBeNull());
+    expect(page.textContent).toContain("Twitch setup cancelled");
+    expect(page.textContent).not.toContain("fake-client-secret");
   });
 
   it("collapses an empty transcript around a blocking startup error", async () => {
@@ -959,5 +1003,6 @@ describe("custodian page", () => {
     page.querySelector<HTMLButtonElement>(".custodian__header button")!.click();
 
     expect(context.navigate).toHaveBeenCalledWith("chat");
+    expect(request).toHaveBeenCalledOnce();
   });
 });

@@ -18,6 +18,7 @@ import { classifySystemAgentApprovalText } from "./approval-intent.js";
 import {
   SystemAgentChatEngine as RuntimeSystemAgentChatEngine,
   SystemAgentWizardAnswerError,
+  SystemAgentWizardCancelError,
   type SystemAgentChatEngineOptions,
 } from "./chat-engine.js";
 import { SystemAgentInferenceUnavailableError } from "./inference-error.js";
@@ -3502,6 +3503,63 @@ describe("OpenClaw chat wizard step payload", () => {
 
     expect(done.step).toBeUndefined();
     expect(JSON.stringify(engine.historySince(0))).not.toContain("ignored");
+  });
+
+  it("cancels the exact active hosted wizard without running inference", async () => {
+    useTempStateDir();
+    const runAgentTurn = vi.fn(async () => ({ text: "should not run" }));
+    const engine = new SystemAgentChatEngine({
+      surface: "gateway",
+      runAgentTurn,
+      planWithAssistant: async () => null,
+      deps: { loadOverview: fakeOverviewLoader() },
+      runChannelSetupWizard: async (_channel: string, prompter: WizardPrompter) => {
+        await prompter.text({ message: "Bot token", sensitive: true });
+      },
+    });
+
+    const prompt = await engine.handle("connect telegram");
+    const stepId = expectDefined(prompt.step?.id, "expected an active wizard step");
+    const cancelled = await engine.cancelWizard({ stepId });
+
+    expect(cancelled.text).toContain("setup cancelled");
+    expect(cancelled.wizardInputPending).toBeUndefined();
+    expect(cancelled.step).toBeUndefined();
+    expect(runAgentTurn).not.toHaveBeenCalled();
+    expect(engine.historySince(0)).toContainEqual({ role: "user", text: "Cancel setup" });
+  });
+
+  it("rejects a stale typed cancellation without changing the active step", async () => {
+    useTempStateDir();
+    const engine = new SystemAgentChatEngine({
+      surface: "gateway",
+      runAgentTurn: async () => null,
+      planWithAssistant: async () => null,
+      deps: { loadOverview: fakeOverviewLoader() },
+      runChannelSetupWizard: async (_channel: string, prompter: WizardPrompter) => {
+        await prompter.text({ message: "Bot token" });
+      },
+    });
+
+    const prompt = await engine.handle("connect telegram");
+    await expect(engine.cancelWizard({ stepId: "stale-step" })).rejects.toBeInstanceOf(
+      SystemAgentWizardCancelError,
+    );
+    const stepId = expectDefined(prompt.step?.id, "expected an active wizard step");
+    const done = await engine.answerWizard({ stepId, value: "123:abc" });
+
+    expect(done.step).toBeUndefined();
+  });
+
+  it("rejects typed cancellation when no hosted wizard is active", async () => {
+    const engine = new SystemAgentChatEngine({
+      runAgentTurn: async () => null,
+      deps: { loadOverview: fakeOverviewLoader() },
+    });
+
+    await expect(engine.cancelWizard({ stepId: "missing" })).rejects.toBeInstanceOf(
+      SystemAgentWizardCancelError,
+    );
   });
 
   it("redacts a sensitive structured answer from engine history", async () => {

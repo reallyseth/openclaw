@@ -33,7 +33,11 @@ const SYSTEM_AGENT_CHAT_TIMEOUT_MS = 190_000;
 const SILENT_REPLY_PATTERN = /^\s*NO_REPLY\s*$/;
 
 function hasCustodianUserInput(params: SystemAgentChatParams): boolean {
-  return params.message !== undefined || params.wizardAnswer !== undefined;
+  return (
+    params.message !== undefined ||
+    params.wizardAnswer !== undefined ||
+    params.wizardCancel !== undefined
+  );
 }
 
 type StoreListener = () => void;
@@ -311,6 +315,30 @@ export class CustodianSessionStore {
       client,
       { sessionId: this.sessionId, wizardAnswer: submission.answer },
       displayText,
+      true,
+    );
+  }
+
+  cancelWizardStep(message: CustodianMessage): void {
+    const activeWizardMessage = this.messages.findLast((candidate) => candidate.step !== null);
+    const step = message.step;
+    const client = this.activeClient;
+    if (
+      !step ||
+      message !== activeWizardMessage ||
+      !this.wizardInputPending ||
+      !client ||
+      !this.chatAvailable ||
+      this.sending ||
+      this.setupRequired
+    ) {
+      this.emit();
+      return;
+    }
+    void this.sendUserTurn(
+      client,
+      { sessionId: this.sessionId, wizardCancel: { stepId: step.id } },
+      t("common.cancel"),
       true,
     );
   }

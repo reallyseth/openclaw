@@ -271,6 +271,12 @@ openclaw-custodian-page {
   font-size: 14px;
 }
 
+.custodian__wizard-footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .custodian__thinking {
   display: flex;
   flex-direction: row;
@@ -477,8 +483,9 @@ openclaw-custodian-page {
 }
 
 @media (max-width: 400px) {
-  .custodian__option-card {
-    margin-left: 0;
+  .custodian__option-card,
+  .custodian__wizard-step {
+    margin-inline: 0;
   }
 }
 

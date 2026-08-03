@@ -1,5 +1,6 @@
 // OpenClaw chat engine: transport-agnostic conversation over typed operations.
 import type {
+  SystemAgentChatParams,
   SystemAgentChatQuestion,
   WizardAnswer,
 } from "../../packages/gateway-protocol/src/index.js";
@@ -650,6 +651,7 @@ function formatStructuredWizardAnswerForHistory(step: WizardStep, value: unknown
 }
 
 export class SystemAgentWizardAnswerError extends Error {}
+export class SystemAgentWizardCancelError extends Error {}
 
 function formatOperationError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
@@ -794,6 +796,14 @@ export class SystemAgentChatEngine {
     return await turn;
   }
 
+  async cancelWizard(
+    cancellation: NonNullable<SystemAgentChatParams["wizardCancel"]>,
+  ): Promise<SystemAgentChatReply> {
+    const turn = this.turnQueue.then(() => this.cancelWizardSerialized(cancellation));
+    this.turnQueue = turn.catch(() => undefined);
+    return await turn;
+  }
+
   private async handleSerialized(
     text: string,
     options?: SystemAgentChatTurnOptions,
@@ -827,6 +837,26 @@ export class SystemAgentChatEngine {
       { text, action: "none" },
       formatStructuredWizardAnswerForHistory(step, answer.value),
     );
+  }
+
+  private async cancelWizardSerialized(
+    cancellation: NonNullable<SystemAgentChatParams["wizardCancel"]>,
+  ): Promise<SystemAgentChatReply> {
+    const bridge = this.wizardBridge;
+    const step = bridge?.step;
+    if (!bridge || !step) {
+      throw new SystemAgentWizardCancelError("No hosted wizard is awaiting cancellation.");
+    }
+    if (cancellation.stepId !== step.id) {
+      throw new SystemAgentWizardCancelError(
+        "The hosted wizard cancellation targets a stale step.",
+      );
+    }
+    if (!bridge.session.cancel()) {
+      throw new SystemAgentWizardCancelError("The hosted wizard can no longer be cancelled.");
+    }
+    const text = await this.pumpWizardBridge();
+    return this.completeTurn({ text, action: "none" }, "Cancel setup");
   }
 
   private completeTurn(reply: SystemAgentChatReply, userHistoryText: string): SystemAgentChatReply {

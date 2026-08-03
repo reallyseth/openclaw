@@ -26,6 +26,7 @@ import { defaultRuntime } from "../../runtime.js";
 import {
   SystemAgentChatEngine,
   SystemAgentWizardAnswerError,
+  SystemAgentWizardCancelError,
 } from "../../system-agent/chat-engine.js";
 import { resolveSystemAgentDelegationKey } from "../../system-agent/delegation-session.js";
 import {
@@ -571,9 +572,22 @@ export const systemAgentHandlers: GatewayRequestHandlers = {
           );
           return;
         }
+        if (params.wizardCancel !== undefined && !session) {
+          respond(
+            false,
+            undefined,
+            errorShape(
+              ErrorCodes.INVALID_REQUEST,
+              "No active OpenClaw chat session is awaiting that wizard cancellation.",
+              { details: buildSystemAgentSessionInvalidatedErrorDetails() },
+            ),
+          );
+          return;
+        }
         let greetingAuditSequence: number | undefined;
         const welcomeOnly =
           params.wizardAnswer === undefined &&
+          params.wizardCancel === undefined &&
           (params.message === undefined || !params.message.trim());
         if (!session) {
           const inference = params.delegation
@@ -686,6 +700,7 @@ export const systemAgentHandlers: GatewayRequestHandlers = {
         // Inline check (not `welcomeOnly`) so TS narrows params.message below.
         if (
           params.wizardAnswer === undefined &&
+          params.wizardCancel === undefined &&
           (params.message === undefined || !params.message.trim())
         ) {
           respond(
@@ -719,7 +734,10 @@ export const systemAgentHandlers: GatewayRequestHandlers = {
           reply = turnReply;
         } catch (error) {
           persistEngineHistory(session.engine, historyStart);
-          if (error instanceof SystemAgentWizardAnswerError) {
+          if (
+            error instanceof SystemAgentWizardAnswerError ||
+            error instanceof SystemAgentWizardCancelError
+          ) {
             respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, error.message));
             return;
           }

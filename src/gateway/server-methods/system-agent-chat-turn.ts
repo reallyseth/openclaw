@@ -5,17 +5,35 @@ import type {
 import type { SystemAgentChatEngine } from "../../system-agent/chat-engine.js";
 
 type SystemAgentChatReply = Awaited<ReturnType<SystemAgentChatEngine["handle"]>>;
-type SystemAgentChatEngineInput = Pick<SystemAgentChatEngine, "answerWizard" | "handle">;
+type SystemAgentChatEngineInput = Pick<
+  SystemAgentChatEngine,
+  "answerWizard" | "cancelWizard" | "handle"
+>;
 
 export function getSystemAgentChatInputError(params: SystemAgentChatParams): string | undefined {
-  if (params.message !== undefined && params.wizardAnswer !== undefined) {
+  const structuredInputCount =
+    Number(params.wizardAnswer !== undefined) + Number(params.wizardCancel !== undefined);
+  if (
+    params.message !== undefined &&
+    params.wizardAnswer !== undefined &&
+    params.wizardCancel === undefined
+  ) {
     return "Send either message or wizardAnswer, not both.";
+  }
+  if ((params.message !== undefined && structuredInputCount > 0) || structuredInputCount > 1) {
+    return "Send only one of message, wizardAnswer, or wizardCancel.";
   }
   if (params.wizardAnswer !== undefined && params.delegation !== undefined) {
     return "Delegated OpenClaw sessions cannot submit structured wizard answers.";
   }
+  if (params.wizardCancel !== undefined && params.delegation !== undefined) {
+    return "Delegated OpenClaw sessions cannot cancel hosted wizards.";
+  }
   if (params.wizardAnswer !== undefined && params.reset === true) {
     return "A wizard answer cannot reset its OpenClaw chat session.";
+  }
+  if (params.wizardCancel !== undefined && params.reset === true) {
+    return "A wizard cancellation cannot reset its OpenClaw chat session.";
   }
   return undefined;
 }
@@ -24,6 +42,9 @@ export async function runSystemAgentChatInput(params: {
   engine: SystemAgentChatEngineInput;
   input: SystemAgentChatParams;
 }): Promise<SystemAgentChatReply | undefined> {
+  if (params.input.wizardCancel !== undefined) {
+    return await params.engine.cancelWizard(params.input.wizardCancel);
+  }
   if (params.input.wizardAnswer !== undefined) {
     return await params.engine.answerWizard(params.input.wizardAnswer);
   }
