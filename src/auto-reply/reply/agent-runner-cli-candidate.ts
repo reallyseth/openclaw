@@ -16,10 +16,9 @@ import { withLocalSessionPlacementTurnAdmission } from "../../agents/session-pla
 import { normalizeChatType } from "../../channels/chat-type.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import {
-  claimAgentRunContext,
   getAgentEventLifecycleGeneration,
-  getAgentRunContext,
 } from "../../infra/agent-events.js";
+import { claimAgentRunContext, getAgentRunContext } from "../../infra/agent-run-registry.js";
 import {
   getGeneratedMediaTaskIdsForSessionKey,
   hasNewGeneratedMediaTaskForSessionKey,
