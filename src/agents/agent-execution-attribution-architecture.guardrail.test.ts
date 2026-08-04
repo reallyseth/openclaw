@@ -9,7 +9,6 @@ const SOURCE_EXTENSIONS = new Set([".cjs", ".cts", ".js", ".mjs", ".mts", ".ts",
 const SKIPPED_DIRECTORIES = new Set([".git", "dist", "node_modules", "vendor"]);
 
 const ALLOWED_PRODUCTION_IMPORTERS = [
-  "src/agents/agent-tools-internal.ts",
   "src/agents/agent-tools.before-tool-call.types.ts",
   "src/agents/agent-tools.ts",
   "src/agents/cli-runner/types.ts",
