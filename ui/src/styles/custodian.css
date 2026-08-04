@@ -277,6 +277,10 @@ openclaw-custodian-page {
   justify-content: flex-end;
 }
 
+.custodian__wizard-cancel {
+  min-height: 44px;
+}
+
 .custodian__thinking {
   display: flex;
   flex-direction: row;
