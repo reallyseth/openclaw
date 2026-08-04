@@ -299,7 +299,7 @@ describe("createOpenClawCodingTools", () => {
     initializeGlobalHookRunner(
       createMockPluginRegistry([{ hookName: "before_tool_call", handler: beforeToolCall }]),
     );
-    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-hook-attribution-"));
+    const tmpDir = tempDirs.make("openclaw-hook-attribution-");
     await fs.writeFile(path.join(tmpDir, "note.txt"), "hello");
     const forgedAttribution = createAgentExecutionAttribution({
       runId: "forged-run",

@@ -8,6 +8,7 @@ import { createMockPluginRegistry } from "../../../plugins/hooks.test-fixtures.j
 import { createAgentExecutionAttribution } from "../../agent-execution-attribution.js";
 import type { HookContext } from "../../agent-tools.before-tool-call.js";
 import { applyCodeModeCatalog, createCodeModeTools } from "../../code-mode.js";
+import type { ExtensionContext } from "../../sessions/index.js";
 import { createStubTool } from "../../test-helpers/agent-tool-stubs.js";
 import {
   applyToolSearchCatalog,
@@ -166,12 +167,12 @@ describe("prepareEmbeddedAttemptClientTools", () => {
         agentId: "flat-agent",
       },
     });
-    const clientTool = result.clientToolDefs[0];
-    if (!clientTool) {
+    const directClientTool = result.clientToolDefs[0];
+    if (!directClientTool) {
       throw new Error("expected direct client tool");
     }
 
-    await clientTool.execute("client-call", {}, undefined, undefined, {});
+    await directClientTool.execute("client-call", {}, undefined, undefined, {} as ExtensionContext);
 
     expect(beforeToolCall.mock.calls[0]?.[1]).toMatchObject({
       runId: "admitted-run",
