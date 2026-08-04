@@ -1,5 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
+import {
+  initializeGlobalHookRunner,
+  resetGlobalHookRunner,
+} from "../../../plugins/hook-runner-global.js";
+import { createMockPluginRegistry } from "../../../plugins/hooks.test-fixtures.js";
+import { createAgentExecutionAttribution } from "../../agent-execution-attribution.js";
+import type { HookContext } from "../../agent-tools.before-tool-call.js";
 import { applyCodeModeCatalog, createCodeModeTools } from "../../code-mode.js";
 import { createStubTool } from "../../test-helpers/agent-tool-stubs.js";
 import {
@@ -63,6 +70,7 @@ function prepare(input: {
   attemptConfig: OpenClawConfig;
   toolSearchRuntimeConfig: OpenClawConfig;
   catalogRef: ReturnType<typeof createToolSearchCatalogRef>;
+  catalogToolHookContext?: HookContext;
 }) {
   return prepareEmbeddedAttemptClientTools({
     attempt: {
@@ -70,7 +78,7 @@ function prepare(input: {
       sessionId: "session",
       runId: "run",
     },
-    catalogToolHookContext: undefined,
+    catalogToolHookContext: input.catalogToolHookContext,
     codeModeControlsEnabledForRun: input.codeModeControlsEnabledForRun,
     deferredDirectoryToolsCallable: false,
     effectiveTools: [],
@@ -86,6 +94,10 @@ function prepare(input: {
 }
 
 describe("prepareEmbeddedAttemptClientTools", () => {
+  afterEach(() => {
+    resetGlobalHookRunner();
+  });
+
   it("hides client tools behind the code-mode catalog when code mode is engaged", () => {
     const catalogRef = seedCatalog("code-mode", CODE_MODE_CONFIG);
 
@@ -127,5 +139,46 @@ describe("prepareEmbeddedAttemptClientTools", () => {
     });
 
     expect(result.clientToolDefs.map((tool) => tool.name)).toEqual(["client_probe"]);
+  });
+
+  it("uses admitted attribution for direct client-tool hook correlation", async () => {
+    const beforeToolCall = vi.fn();
+    initializeGlobalHookRunner(
+      createMockPluginRegistry([{ hookName: "before_tool_call", handler: beforeToolCall }]),
+    );
+    const attribution = createAgentExecutionAttribution({
+      runId: "admitted-run",
+      lifecycleGeneration: "admitted-generation",
+      sessionKey: "admitted-session",
+      sessionId: "admitted-session-id",
+      agentId: "admitted-agent",
+    });
+    const result = prepare({
+      codeModeControlsEnabledForRun: false,
+      attemptConfig: TOOL_SEARCH_CONFIG,
+      toolSearchRuntimeConfig: CATALOGS_DISABLED_CONFIG,
+      catalogRef: seedCatalog("tool-search", TOOL_SEARCH_CONFIG),
+      catalogToolHookContext: {
+        attribution,
+        runId: "flat-run",
+        sessionKey: "flat-session",
+        sessionId: "flat-session-id",
+        agentId: "flat-agent",
+      },
+    });
+    const clientTool = result.clientToolDefs[0];
+    if (!clientTool) {
+      throw new Error("expected direct client tool");
+    }
+
+    await clientTool.execute("client-call", {}, undefined, undefined, {});
+
+    expect(beforeToolCall.mock.calls[0]?.[1]).toMatchObject({
+      runId: "admitted-run",
+      sessionKey: "admitted-session",
+      sessionId: "admitted-session-id",
+      agentId: "admitted-agent",
+    });
+    expect(beforeToolCall.mock.calls[0]?.[1]).not.toHaveProperty("lifecycleGeneration");
   });
 });

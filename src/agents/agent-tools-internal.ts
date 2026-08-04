@@ -1,19 +1,11 @@
-import type { AgentExecutionAttribution } from "./agent-execution-attribution.js";
-import { createOpenClawCodingTools } from "./agent-tools.js";
+import { createOpenClawCodingToolsInternal } from "./agent-tools.js";
 
-type OpenClawCodingToolsOptions = NonNullable<Parameters<typeof createOpenClawCodingTools>[0]>;
-
-type OpenClawCodingToolsInternalOptions = OpenClawCodingToolsOptions & {
-  /** Host-owned correlation intentionally absent from the plugin SDK signature. */
-  attribution?: AgentExecutionAttribution;
-};
-
-const createOpenClawCodingToolsInternal = createOpenClawCodingTools as (
-  options?: OpenClawCodingToolsInternalOptions,
-) => ReturnType<typeof createOpenClawCodingTools>;
+type OpenClawCodingToolsInternalOptions = NonNullable<
+  Parameters<typeof createOpenClawCodingToolsInternal>[0]
+>;
 
 export function createOpenClawCodingToolsForRuntime(
   options?: OpenClawCodingToolsInternalOptions,
-): ReturnType<typeof createOpenClawCodingTools> {
+): ReturnType<typeof createOpenClawCodingToolsInternal> {
   return createOpenClawCodingToolsInternal(options);
 }

@@ -120,6 +120,7 @@ export function prepareEmbeddedAttemptClientTools(params: {
           },
         },
         {
+          ...params.catalogToolHookContext,
           agentId: params.sessionAgentId,
           sessionKey: params.sandboxSessionKey,
           config: params.toolSearchRuntimeConfig,

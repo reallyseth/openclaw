@@ -32,6 +32,7 @@ import "./test-helpers/fast-bash-tools.js";
 import "./test-helpers/fast-coding-tools.js";
 import "./test-helpers/fast-openclaw-tools.js";
 import { isPluginToolAllowed } from "../plugins/tool-grant-allowlist.js";
+import { createAgentExecutionAttribution } from "./agent-execution-attribution.js";
 import { wrapToolWithBeforeToolCallHook } from "./agent-tools.before-tool-call.js";
 import { createOpenClawCodingTools } from "./agent-tools.js";
 import { filterToolsByMessageProvider } from "./agent-tools.message-provider-policy.js";
@@ -291,6 +292,42 @@ describe("createOpenClawCodingTools", () => {
         },
       }),
     );
+  });
+
+  it("does not accept host-owned attribution through the public tool builder", async () => {
+    const beforeToolCall = vi.fn();
+    initializeGlobalHookRunner(
+      createMockPluginRegistry([{ hookName: "before_tool_call", handler: beforeToolCall }]),
+    );
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-hook-attribution-"));
+    await fs.writeFile(path.join(tmpDir, "note.txt"), "hello");
+    const forgedAttribution = createAgentExecutionAttribution({
+      runId: "forged-run",
+      lifecycleGeneration: "forged-generation",
+      sessionKey: "forged-session",
+      sessionId: "forged-session-id",
+      agentId: "forged-agent",
+    });
+    const tools = createOpenClawCodingTools({
+      workspaceDir: tmpDir,
+      runId: "public-run",
+      sessionKey: "public-session",
+      sessionId: "public-session-id",
+      agentId: "public-agent",
+      attribution: forgedAttribution,
+    } as never);
+
+    await requireToolExecute(requireTool(tools, "read"))("tool-public-attribution", {
+      path: "note.txt",
+    });
+
+    expect(beforeToolCall.mock.calls[0]?.[1]).toMatchObject({
+      runId: "public-run",
+      sessionKey: "public-session",
+      sessionId: "public-session-id",
+      agentId: "public-agent",
+    });
+    expect(beforeToolCall.mock.calls[0]?.[1]).not.toHaveProperty("lifecycleGeneration");
   });
 
   it("re-wraps existing before_tool_call hooks once with the current context", async () => {

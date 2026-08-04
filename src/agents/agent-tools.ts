@@ -481,7 +481,7 @@ type OpenClawCodingToolsInternalOptions = OpenClawCodingToolsOptions & {
   attribution?: AgentExecutionAttribution;
 };
 
-function createOpenClawCodingToolsInternal(
+export function createOpenClawCodingToolsInternal(
   options?: OpenClawCodingToolsInternalOptions,
 ): AnyAgentTool[] {
   const execToolName = "exec";
@@ -1264,6 +1264,13 @@ function createOpenClawCodingToolsInternal(
 
 /** Build the runtime tool list exposed through the public agent harness SDK. */
 export function createOpenClawCodingTools(options?: OpenClawCodingToolsOptions): AnyAgentTool[] {
-  return createOpenClawCodingToolsInternal(options);
+  if (!options) {
+    return createOpenClawCodingToolsInternal();
+  }
+  // The SDK is a JavaScript boundary. Untyped plugins cannot stamp trusted
+  // execution correlation onto the host-owned tool hook context.
+  const { attribution: _attribution, ...publicOptions } = options as OpenClawCodingToolsOptions &
+    Pick<OpenClawCodingToolsInternalOptions, "attribution">;
+  return createOpenClawCodingToolsInternal(publicOptions);
 }
 /* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */
