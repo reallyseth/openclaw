@@ -15,7 +15,10 @@ import {
 import { withLocalSessionPlacementTurnAdmission } from "../../agents/session-placement-admission.js";
 import { normalizeChatType } from "../../channels/chat-type.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
-import { getAgentEventLifecycleGeneration } from "../../infra/agent-events.js";
+import {
+  assertAgentRunLifecycleGenerationCurrent,
+  getAgentEventLifecycleGeneration,
+} from "../../infra/agent-events.js";
 import { claimAgentRunContext, getAgentRunContext } from "../../infra/agent-run-registry.js";
 import {
   getGeneratedMediaTaskIdsForSessionKey,
@@ -162,6 +165,7 @@ export async function runCliFallbackCandidate(params: {
   const bridgeCliDurableCommentary =
     Boolean(params.presentation.blockReplyHandler) &&
     (turn.blockStreamingEnabled || turn.opts?.commentaryPayloadsEnabled === true);
+  const queuedLifecycleGeneration = params.getLifecycleGeneration();
   const result = await params.timing.measure("cli_run", () =>
     withLocalSessionPlacementTurnAdmission(
       {
@@ -171,10 +175,15 @@ export async function runCliFallbackCandidate(params: {
         runId: params.runId,
       },
       () => {
+        const lifecycleGeneration = getAgentEventLifecycleGeneration();
+        // Background admission is tied to the gateway generation that queued it.
+        // Only foreground work may rebind after placement waits across a restart.
+        if (turn.isHeartbeat && lifecycleGeneration !== queuedLifecycleGeneration) {
+          assertAgentRunLifecycleGenerationCurrent(queuedLifecycleGeneration);
+        }
         // Admission may wait behind another turn that starts detached media.
         // Snapshot only after this turn owns the session placement.
         const mediaTaskIdsBefore = getGeneratedMediaTaskIdsForSessionKey(turn.sessionKey);
-        const lifecycleGeneration = getAgentEventLifecycleGeneration();
         const attribution =
           turn.attribution?.lifecycleGeneration === lifecycleGeneration
             ? turn.attribution

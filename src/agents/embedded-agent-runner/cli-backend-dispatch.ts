@@ -184,15 +184,16 @@ async function runEmbeddedAgentViaCliBackend(
   // watchdogs on this signal; dispatched runs emit it at the same
   // post-admission boundary where the native path does.
   params.onExecutionStarted?.(
-    params.lifecycleGeneration !== undefined || params.attribution !== undefined
-      ? {
-          ...(params.lifecycleGeneration !== undefined
-            ? { lifecycleGeneration: params.lifecycleGeneration }
-            : {}),
-          ...(params.attribution ? { attribution: params.attribution } : {}),
-        }
+    params.lifecycleGeneration !== undefined
+      ? { lifecycleGeneration: params.lifecycleGeneration }
       : undefined,
   );
+  params.onExecutionAttributionChanged?.({
+    ...(params.lifecycleGeneration !== undefined
+      ? { lifecycleGeneration: params.lifecycleGeneration }
+      : {}),
+    ...(params.attribution ? { attribution: params.attribution } : {}),
+  });
   log.info(
     `dispatching embedded run through CLI backend: runId=${params.runId} provider=${dispatch.provider} model=${params.model ?? ""}`,
   );

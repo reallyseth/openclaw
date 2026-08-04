@@ -74,8 +74,12 @@ import {
 } from "../cli-session.js";
 import { resolveConversationCapabilityProfile } from "../conversation-capability-profile.js";
 import { resolveConversationToolPolicies } from "../conversation-tool-policy-pipeline.js";
-import type { AgentExecutionStartedInfo } from "../embedded-agent-runner/run/internal-params.js";
-import { runEmbeddedAgent, type EmbeddedAgentRunResult } from "../embedded-agent.js";
+import { runEmbeddedAgentInternal } from "../embedded-agent-runner/run-orchestrator.js";
+import type {
+  AgentExecutionAttributionInfo,
+  RunEmbeddedAgentInternalParams,
+} from "../embedded-agent-runner/run/internal-params.js";
+import type { EmbeddedAgentRunResult } from "../embedded-agent.js";
 import { runAgentHarnessBeforeMessageWriteHook } from "../harness/hook-helpers.js";
 import { resolveAvailableAgentHarnessPolicy } from "../harness/selection.js";
 import { resolveCliRuntimeExecutionProvider } from "../model-runtime-aliases.js";
@@ -1139,7 +1143,7 @@ export function runAgentAttempt(params: {
     });
   }
 
-  const embeddedRunParams: Parameters<typeof runEmbeddedAgent>[0] = {
+  const embeddedRunParams: RunEmbeddedAgentInternalParams = {
     sessionId: params.sessionId,
     sessionKey: params.sessionKey,
     chatType: params.sessionEntry?.chatType,
@@ -1238,8 +1242,10 @@ export function runAgentAttempt(params: {
     suppressNextUserMessagePersistence: params.suppressPromptPersistenceOnRetry === true,
     userTurnTranscriptRecorder: params.userTurnTranscriptRecorder,
     onUserMessagePersisted: params.onUserMessagePersisted,
-    onExecutionStarted: (info: AgentExecutionStartedInfo | undefined) => {
+    onExecutionStarted: () => {
       params.opts.onExecutionStarted?.();
+    },
+    onExecutionAttributionChanged: (info: AgentExecutionAttributionInfo) => {
       if (info?.lifecycleGeneration) {
         params.onLifecycleGenerationChanged?.(info.lifecycleGeneration, info.attribution);
       }
@@ -1253,7 +1259,7 @@ export function runAgentAttempt(params: {
     embeddedRunParams,
     readChannelSourceTurnSameThreadRequired(params.runContext),
   );
-  return runEmbeddedAgent(embeddedRunParams);
+  return runEmbeddedAgentInternal(embeddedRunParams);
 }
 
 export function buildAcpResult(params: {

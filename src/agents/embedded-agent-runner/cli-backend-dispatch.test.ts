@@ -420,13 +420,20 @@ describe("runEmbeddedAgentViaCliBackendIfEligible execution", () => {
       agentId: "main",
     });
     const onExecutionStarted = vi.fn();
+    const onExecutionAttributionChanged = vi.fn();
 
     await runEmbeddedAgentViaCliBackendIfEligible(
-      baseRunParams({ attribution, lifecycleGeneration: "gen-1", onExecutionStarted }),
+      baseRunParams({
+        attribution,
+        lifecycleGeneration: "gen-1",
+        onExecutionStarted,
+        onExecutionAttributionChanged,
+      }),
     );
 
     expect(runCliAgent.mock.calls[0]?.[0]?.attribution).toBe(attribution);
-    expect(onExecutionStarted).toHaveBeenCalledWith({
+    expect(onExecutionStarted).toHaveBeenCalledWith({ lifecycleGeneration: "gen-1" });
+    expect(onExecutionAttributionChanged).toHaveBeenCalledWith({
       lifecycleGeneration: "gen-1",
       attribution,
     });

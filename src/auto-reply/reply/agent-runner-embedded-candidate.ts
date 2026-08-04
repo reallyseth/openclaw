@@ -1,12 +1,12 @@
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { resolveBootstrapWarningSignaturesSeen } from "../../agents/bootstrap-budget.js";
 import type { BootstrapContextRunKind } from "../../agents/bootstrap-mode.js";
+import { runEmbeddedAgentInternal } from "../../agents/embedded-agent-runner/run-orchestrator.js";
 import type {
-  AgentExecutionStartedInfo,
+  AgentExecutionAttributionInfo,
   RunEmbeddedAgentInternalParams,
 } from "../../agents/embedded-agent-runner/run/internal-params.js";
 import type { RunEmbeddedAgentParams } from "../../agents/embedded-agent-runner/run/params.js";
-import { runEmbeddedAgent } from "../../agents/embedded-agent.js";
 import type { FastModeAutoProgressState } from "../../agents/fast-mode.js";
 import { resolveAgentHarnessPolicy } from "../../agents/harness/policy.js";
 import { resolveOpenAIRuntimeProvider } from "../../agents/openai-routing.js";
@@ -84,7 +84,7 @@ export async function runEmbeddedFallbackCandidate(params: {
     ReturnType<typeof import("./current-turn-images.js").resolveCurrentTurnImages>
   >;
   signalExecutionPhaseForTyping: NonNullable<
-    Parameters<typeof runEmbeddedAgent>[0]["onExecutionPhase"]
+    Parameters<typeof runEmbeddedAgentInternal>[0]["onExecutionPhase"]
   >;
   notifyAgentRunStart: () => void;
   notifyUserAboutCompaction: boolean;
@@ -96,7 +96,7 @@ export async function runEmbeddedFallbackCandidate(params: {
   onLifecycleBackstop: (backstop: AgentLifecycleTerminalBackstop) => void;
   onCompactionCount: (count: number) => void;
 }): Promise<{
-  result: Awaited<ReturnType<typeof runEmbeddedAgent>>;
+  result: Awaited<ReturnType<typeof runEmbeddedAgentInternal>>;
   bootstrapPromptWarningSignaturesSeen: string[];
 }> {
   const turn = params.turn;
@@ -250,12 +250,14 @@ export async function runEmbeddedFallbackCandidate(params: {
         abortSignal: params.runAbortSignal,
         replyOperation: turn.replyOperation,
         deferTerminalLifecycle: true,
-        onExecutionStarted: (info: AgentExecutionStartedInfo | undefined) => {
-          if (info?.attribution) {
-            turn.attribution = info.attribution;
-          }
+        onExecutionStarted: (info) => {
           if (info?.lifecycleGeneration) {
             params.onLifecycleGeneration(info.lifecycleGeneration);
+          }
+        },
+        onExecutionAttributionChanged: (info: AgentExecutionAttributionInfo) => {
+          if (info?.attribution) {
+            turn.attribution = info.attribution;
           }
         },
         onExecutionPhase: params.signalExecutionPhaseForTyping,
@@ -400,7 +402,7 @@ export async function runEmbeddedFallbackCandidate(params: {
             })()
           : undefined,
       };
-      return runEmbeddedAgent(embeddedRunParams);
+      return runEmbeddedAgentInternal(embeddedRunParams);
     });
     const resultCompactionCount = Math.max(0, result.meta?.agentMeta?.compactionCount ?? 0);
     attemptCompactionCount = Math.max(attemptCompactionCount, resultCompactionCount);

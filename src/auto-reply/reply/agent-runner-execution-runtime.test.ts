@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { testing as cliBackendsTesting } from "../../agents/cli-backends.test-support.js";
+import { installSessionPlacementAdmissionProvider } from "../../agents/session-placement-admission.js";
 import type { SessionEntry } from "../../config/sessions.js";
 import { rotateAgentEventLifecycleGeneration } from "../../infra/agent-events.js";
 import type { TemplateContext } from "../templating.js";
@@ -206,6 +207,47 @@ describe("executeAgentTurn: runtime selection", () => {
         lifecycleGeneration: rotatedGeneration,
       }),
     });
+  });
+
+  it("rejects queued heartbeat CLI fallback after placement crosses a lifecycle rotation", async () => {
+    state.isCliProviderMock.mockReturnValue(true);
+    state.runWithModelFallbackMock.mockImplementationOnce(async (params: FallbackRunnerParams) => ({
+      result: await params.run("codex-cli", "gpt-5.4"),
+      provider: "codex-cli",
+      model: "gpt-5.4",
+      attempts: [],
+    }));
+    state.runCliAgentMock.mockResolvedValueOnce({
+      payloads: [{ text: "must not run" }],
+      meta: {},
+    });
+    const uninstallPlacement = installSessionPlacementAdmissionProvider({
+      executeLocalTurn: async (_claim, runLocal) => {
+        rotateAgentEventLifecycleGeneration();
+        return await runLocal();
+      },
+      executeTurn: async (_claim, _params, runLocal) => await runLocal(),
+    });
+
+    try {
+      const executeAgentTurn = await getExecuteAgentTurnForTest();
+      const followupRun = createFollowupRun();
+      followupRun.run.provider = "codex-cli";
+      followupRun.run.model = "gpt-5.4";
+      const turn = createMinimalRunAgentTurnParams({ followupRun });
+      turn.isHeartbeat = true;
+
+      await expect(executeAgentTurn(turn)).resolves.toEqual({
+        kind: "final",
+        payload: {
+          isError: true,
+          text: "⚠️ Heartbeat check failed before it could produce an update. The main chat session remains available.",
+        },
+      });
+      expect(state.runCliAgentMock).not.toHaveBeenCalled();
+    } finally {
+      uninstallPlacement();
+    }
   });
 
   it("does not pass CLI runtime overrides as embedded harness ids for fallback providers", async () => {
