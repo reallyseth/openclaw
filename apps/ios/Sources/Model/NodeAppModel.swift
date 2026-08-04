@@ -3709,6 +3709,18 @@ extension NodeAppModel {
         self.agentIdentityValue(for: self.chatAgentId, key: "emoji")
     }
 
+    /// Convenience accessor for Siri intents — resolves the active connected gateway session.
+    var siriGatewaySession: GatewayNodeSession? {
+        guard self.isOperatorGatewayConnected else { return nil }
+        return self.operatorSession
+    }
+
+    /// Convenience accessor for Siri intents — builds a chat transport if connected.
+    var siriChatTransport: (any OpenClawChatTransport)? {
+        guard self.isOperatorGatewayConnected else { return nil }
+        return self.makeChatTransport()
+    }
+
     var activeAgentName: String {
         self.agentDisplayName(for: self.selectedOrDefaultAgentId, fallback: "Main")
     }
