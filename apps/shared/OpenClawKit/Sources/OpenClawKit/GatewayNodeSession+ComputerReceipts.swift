@@ -157,7 +157,13 @@ extension GatewayNodeSession {
             self.computerInvokeReceiptJoinCounts[receipt.id, default: 0] += 1
             #endif
             let response = switch receipt.state {
-            case let .inFlight(task): await task.value
+            case let .inFlight(task):
+                // A duplicate joins the shared side effect but keeps its own deadline.
+                // Timing out this wait must not cancel the original receipt task.
+                await Self.invokeWithTimeout(
+                    request: request,
+                    timeoutMs: timeoutMs,
+                    onInvoke: { _ in await task.value })
             case let .completed(response): response
             }
             self.discardRetryableComputerInvokeReceipt(

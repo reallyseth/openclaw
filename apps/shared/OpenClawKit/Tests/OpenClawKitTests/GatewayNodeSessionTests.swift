@@ -2475,7 +2475,7 @@ struct GatewayNodeSessionTests {
             idempotencyKey: "computer.act:v1:attributed",
             includeSessionKey: true,
             sessionKey: "agent:main:main",
-            timeoutMs: 1_000)
+            timeoutMs: 1000)
         try await waitUntil("attributed computer invoke completed") {
             task.sentRequestCount(method: "node.invoke.result") == 1
         }
@@ -2489,7 +2489,7 @@ struct GatewayNodeSessionTests {
             idempotencyKey: "computer.act:v1:cleared",
             includeSessionKey: true,
             sessionKey: nil,
-            timeoutMs: 1_000)
+            timeoutMs: 1000)
         try await waitUntil("cleared computer invoke completed") {
             task.sentRequestCount(method: "node.invoke.result") == 2
         }
@@ -2833,6 +2833,44 @@ struct GatewayNodeSessionTests {
         #expect(await probe.count() == 1)
 
         await gateway.disconnect()
+    }
+
+    @Test
+    func `duplicate computer receipt applies its timeout without cancelling the shared invoke`() async throws {
+        let gateway = GatewayNodeSession()
+        let probe = ComputerInvokeProbe()
+        let paramsJSON = #"{"action":"type","text":"hello"}"#
+        let key = "computer.act:v1:duplicate-timeout"
+        let scope = "gateway:duplicate-timeout"
+
+        let original = Task {
+            await gateway.invokeComputerWithReceiptForTesting(
+                requestId: "original",
+                paramsJSON: paramsJSON,
+                idempotencyKey: key,
+                receiptScope: scope,
+                onInvoke: { request in await probe.execute(request) })
+        }
+        try await waitUntil("original computer invoke started") {
+            await probe.count() == 1
+        }
+
+        let duplicate = await gateway.invokeComputerWithReceiptForTesting(
+            requestId: "duplicate",
+            paramsJSON: paramsJSON,
+            idempotencyKey: key,
+            receiptScope: scope,
+            timeoutMs: 10,
+            onInvoke: { request in await probe.execute(request) })
+
+        #expect(!duplicate.ok)
+        #expect(duplicate.id == "duplicate")
+        #expect(duplicate.error?.message == "node invoke timed out")
+        #expect(await probe.count() == 1)
+
+        await probe.release()
+        #expect(await original.value.ok)
+        #expect(await probe.count() == 1)
     }
 
     @Test
