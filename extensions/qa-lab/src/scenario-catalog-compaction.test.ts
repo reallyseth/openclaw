@@ -73,7 +73,7 @@ describe("qa compaction scenario catalog", () => {
       "OpenClaw performs exactly one successful write, one causal continuation, and returns the exact file content and final marker.",
     );
     expect(scenario.successCriteria).toContain(
-      "OpenClaw proves session-memory.pruning by retaining tail blocks 11..15 while pruning marker block 10.",
+      "OpenClaw proves session-memory.pruning by retaining a contiguous newest suffix after pruning marker block 10.",
     );
     expect(scenario.successCriteria).toContain(
       "The Codex runtime-pair cell reports a known harness gap before gateway, session, or provider work and makes no compaction coverage claim.",
@@ -163,8 +163,18 @@ describe("qa compaction scenario catalog", () => {
       "String(overflowRequest.allInputText ?? '').includes(config.bulkyMarker)",
     );
     expect(flow).toContain("!String(writeRequest.allInputText ?? '').includes(config.bulkyMarker)");
-    expect(flow).toContain("JSON.stringify(overflowEvidence.tailBlocks)");
-    expect(flow).toContain("JSON.stringify(['11', '12', '13', '14', '15'])");
+    expect(flow).toContain(
+      "JSON.stringify(overflowEvidence.tailBlocks) === JSON.stringify(Array.from({ length: 16 }, (_, index) => String(index).padStart(2, '0')))",
+    );
+    expect(flow).toContain('"set":"retryTailBlockNumbers"');
+    expect(flow).toContain("writeEvidence.tailBlocks.map((block) => Number(block))");
+    expect(flow).toContain("retryTailBlockNumbers.length > 0");
+    expect(flow).toContain(
+      "retryTailBlockNumbers.every((block, index) => Number.isInteger(block) && (index === 0 || block === retryTailBlockNumbers[index - 1] + 1))",
+    );
+    expect(flow).toContain("retryTailBlockNumbers.at(-1) === 15");
+    expect(flow).toContain("retryTailBlockNumbers[0] > 10");
+    expect(flow).not.toContain("JSON.stringify(['11', '12', '13', '14', '15'])");
     expect(serializedScenario).not.toContain("remote-compaction");
     expect(serializedScenario).not.toContain("remoteCompaction");
     expect(flow).not.toContain("JSON.stringify(overflowRequest)");

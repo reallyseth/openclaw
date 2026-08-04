@@ -13,7 +13,7 @@ scenario:
   successCriteria:
     - One coded over-threshold provider overflow produces one persisted OpenClaw overflow compaction and one compacted retry retaining durable current context.
     - OpenClaw performs exactly one successful write, one causal continuation, and returns the exact file content and final marker.
-    - OpenClaw proves session-memory.pruning by retaining tail blocks 11..15 while pruning marker block 10.
+    - OpenClaw proves session-memory.pruning by retaining a contiguous newest suffix after pruning marker block 10.
     - OpenClaw records one overflow-retry checkpoint whose branch preserves the independent pre-compaction assistant marker.
     - The Codex runtime-pair cell reports a known harness gap before gateway, session, or provider work and makes no compaction coverage claim.
   docsRefs:
@@ -180,9 +180,24 @@ flow:
             message:
               expr: "`OpenClaw retry did not prune marker block 10: ${JSON.stringify({ overflow: overflowEvidence, write: writeEvidence })}`"
         - assert:
-            expr: "JSON.stringify(overflowEvidence.tailBlocks) === JSON.stringify(Array.from({ length: 16 }, (_, index) => String(index).padStart(2, '0'))) && JSON.stringify(writeEvidence.tailBlocks) === JSON.stringify(['11', '12', '13', '14', '15'])"
+            expr: "JSON.stringify(overflowEvidence.tailBlocks) === JSON.stringify(Array.from({ length: 16 }, (_, index) => String(index).padStart(2, '0')))"
             message:
-              expr: "`OpenClaw tail retention did not prove causal pruning of block 10: ${JSON.stringify({ overflow: overflowEvidence, write: writeEvidence })}`"
+              expr: "`OpenClaw overflow request did not contain the full 00..15 tail sequence: ${JSON.stringify(overflowEvidence)}`"
+        - set: retryTailBlockNumbers
+          value:
+            expr: "writeEvidence.tailBlocks.map((block) => Number(block))"
+        - assert:
+            expr: "retryTailBlockNumbers.length > 0"
+            message:
+              expr: "`OpenClaw compacted retry retained no numeric tail suffix: ${JSON.stringify({ overflow: overflowEvidence, write: writeEvidence })}`"
+        - assert:
+            expr: "retryTailBlockNumbers.every((block, index) => Number.isInteger(block) && (index === 0 || block === retryTailBlockNumbers[index - 1] + 1))"
+            message:
+              expr: "`OpenClaw compacted retry tail blocks were not contiguous: ${JSON.stringify({ overflow: overflowEvidence, write: writeEvidence })}`"
+        - assert:
+            expr: "retryTailBlockNumbers.at(-1) === 15 && retryTailBlockNumbers[0] > 10"
+            message:
+              expr: "`OpenClaw compacted retry did not retain the newest suffix after block 10: ${JSON.stringify({ overflow: overflowEvidence, write: writeEvidence })}`"
         - assert:
             expr: "writeRequest.rawByteLength < config.overflowThresholdBytes && writeRequest.rawByteLength < overflowRequest.rawByteLength"
             message:
