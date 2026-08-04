@@ -52,6 +52,22 @@ function trimRunProvenance(state: AgentAuditProjectionState): void {
   }
 }
 
+function canActivateRunInstance(
+  state: AgentAuditProjectionState,
+  activeRunInstance: string | undefined,
+  runInstance: string,
+  hasLifecycleGeneration: boolean,
+): boolean {
+  // Generation-less starts cannot displace a live generated admission. Once
+  // that admission closes, they must replace its retained delayed-tool pointer.
+  return (
+    hasLifecycleGeneration ||
+    !activeRunInstance ||
+    activeRunInstance === runInstance ||
+    !state.openRunProvenance.has(activeRunInstance)
+  );
+}
+
 export function rememberRunStart(
   state: AgentAuditProjectionState,
   runInstance: string,
@@ -66,7 +82,7 @@ export function rememberRunStart(
       provenance;
     state.openRunProvenance.set(runInstance, remembered);
     const activeRunInstance = state.activeRunInstanceByRunId.get(runId);
-    if (hasLifecycleGeneration || !activeRunInstance || activeRunInstance === runInstance) {
+    if (canActivateRunInstance(state, activeRunInstance, runInstance, hasLifecycleGeneration)) {
       state.activeRunInstanceByRunId.delete(runId);
       state.activeRunInstanceByRunId.set(runId, runInstance);
     }
@@ -76,7 +92,7 @@ export function rememberRunStart(
   state.openRunProvenance.set(runInstance, provenance);
   state.seenRunInstances.add(runInstance);
   const activeRunInstance = state.activeRunInstanceByRunId.get(runId);
-  if (hasLifecycleGeneration || !activeRunInstance || activeRunInstance === runInstance) {
+  if (canActivateRunInstance(state, activeRunInstance, runInstance, hasLifecycleGeneration)) {
     state.activeRunInstanceByRunId.delete(runId);
     state.activeRunInstanceByRunId.set(runId, runInstance);
   }
