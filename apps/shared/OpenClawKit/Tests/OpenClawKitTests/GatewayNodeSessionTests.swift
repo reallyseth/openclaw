@@ -2962,6 +2962,61 @@ struct GatewayNodeSessionTests {
     }
 
     @Test
+    func `stale receipt retry preserves the original invoke deadline`() async throws {
+        let gateway = GatewayNodeSession()
+        let staleGate = AsyncGate()
+        let freshProbe = ComputerInvokeProbe()
+        let paramsJSON = #"{"action":"type","text":"hello"}"#
+        let key = "computer.act:v1:stale-deadline"
+        let scope = "gateway:stale-deadline"
+        let stale = Task {
+            await gateway.invokeComputerWithReceiptForTesting(
+                requestId: "stale",
+                paramsJSON: paramsJSON,
+                idempotencyKey: key,
+                receiptScope: scope,
+                onInvoke: { request in
+                    await staleGate.wait()
+                    return GatewayNodeSession.staleRouteInvokeResponse(requestId: request.id)
+                })
+        }
+        try await waitUntil("stale deadline receipt is in flight") {
+            await staleGate.hasStarted()
+        }
+
+        let replay = Task {
+            await gateway.invokeComputerWithReceiptForTesting(
+                requestId: "replay",
+                paramsJSON: paramsJSON,
+                idempotencyKey: key,
+                receiptScope: scope,
+                timeoutMs: 100,
+                onInvoke: { request in await freshProbe.execute(request) })
+        }
+        try await waitUntil("deadline replay joined the stale receipt") {
+            await gateway.computerReceiptJoinCountForTesting(
+                idempotencyKey: key,
+                receiptScope: scope) == 1
+        }
+        let releaseStale = Task {
+            try? await Task.sleep(for: .milliseconds(60))
+            await staleGate.release()
+        }
+        let releaseFresh = Task {
+            try? await Task.sleep(for: .milliseconds(120))
+            await freshProbe.release()
+        }
+
+        let response = await replay.value
+        #expect(!response.ok)
+        #expect(response.error?.message == "node invoke timed out")
+        _ = await releaseStale.value
+        _ = await releaseFresh.value
+        #expect(await stale.value.ok == false)
+        #expect(await freshProbe.count() == 1)
+    }
+
+    @Test
     func `timed out computer receipt stays non evictable until operation settles`() async throws {
         let gateway = GatewayNodeSession()
         let blockedProbe = ComputerInvokeProbe()

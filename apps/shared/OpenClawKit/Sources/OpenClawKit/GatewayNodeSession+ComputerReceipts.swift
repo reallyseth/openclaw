@@ -127,16 +127,38 @@ extension GatewayNodeSession {
         request: BridgeInvokeRequest,
         timeoutMs: Int?,
         receiptScope: String,
+        onInvoke: @escaping @Sendable (BridgeInvokeRequest) async -> BridgeInvokeResponse) async
+        -> BridgeInvokeResponse
+    {
+        let timeout = timeoutMs.map { min(max(0, $0), Self.maxInvokeTimeoutMs) }
+            ?? Self.defaultInvokeTimeoutMs
+        let deadline = timeout > 0
+            ? ContinuousClock.now.advanced(by: .milliseconds(timeout))
+            : nil
+        return await self.invokeWithComputerReceipt(
+            requestPayload: requestPayload,
+            request: request,
+            deadline: deadline,
+            receiptScope: receiptScope,
+            onInvoke: onInvoke,
+            retryStaleJoinedReceipt: true)
+    }
+
+    private func invokeWithComputerReceipt(
+        requestPayload: NodeInvokeRequestPayload,
+        request: BridgeInvokeRequest,
+        deadline: ContinuousClock.Instant?,
+        receiptScope: String,
         onInvoke: @escaping @Sendable (BridgeInvokeRequest) async -> BridgeInvokeResponse,
-        retryStaleJoinedReceipt: Bool = true) async
+        retryStaleJoinedReceipt: Bool) async
         -> BridgeInvokeResponse
     {
         let idempotencyKey = requestPayload.idempotencyKey?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard requestPayload.command == "computer.act", !idempotencyKey.isEmpty else {
-            return await Self.invokeWithTimeout(
+            return await Self.invokeWithComputerDeadline(
                 request: request,
-                timeoutMs: timeoutMs,
+                deadline: deadline,
                 onInvoke: onInvoke)
         }
 
@@ -160,9 +182,9 @@ extension GatewayNodeSession {
             case let .inFlight(task):
                 // A duplicate joins the shared side effect but keeps its own deadline.
                 // Timing out this wait must not cancel the original receipt task.
-                await Self.invokeWithTimeout(
+                await Self.invokeWithComputerDeadline(
                     request: request,
-                    timeoutMs: timeoutMs,
+                    deadline: deadline,
                     onInvoke: { _ in await task.value })
             case let .completed(response): response
             }
@@ -178,7 +200,7 @@ extension GatewayNodeSession {
                 return await self.invokeWithComputerReceipt(
                     requestPayload: requestPayload,
                     request: request,
-                    timeoutMs: timeoutMs,
+                    deadline: deadline,
                     receiptScope: receiptScope,
                     onInvoke: onInvoke,
                     retryStaleJoinedReceipt: false)
@@ -197,9 +219,9 @@ extension GatewayNodeSession {
 
         let receiptID = UUID()
         let task = Task { [self] in
-            await Self.invokeWithTimeout(
+            await Self.invokeWithComputerDeadline(
                 request: request,
-                timeoutMs: timeoutMs,
+                deadline: deadline,
                 onInvoke: onInvoke,
                 onOperationSettled: { [weak self] in
                     await self?.markComputerInvokeOperationSettled(
@@ -227,6 +249,36 @@ extension GatewayNodeSession {
             self.computerInvokeReceipts[receiptKey]?.state = .completed(response)
         }
         return Self.rebindInvokeResponse(response, requestId: request.id)
+    }
+
+    private static func invokeWithComputerDeadline(
+        request: BridgeInvokeRequest,
+        deadline: ContinuousClock.Instant?,
+        onInvoke: @escaping @Sendable (BridgeInvokeRequest) async -> BridgeInvokeResponse,
+        onOperationSettled: (@Sendable () async -> Void)? = nil) async -> BridgeInvokeResponse
+    {
+        guard let deadline else {
+            return await invokeWithTimeout(
+                request: request,
+                timeoutMs: 0,
+                onInvoke: onInvoke,
+                onOperationSettled: onOperationSettled)
+        }
+        let remaining = ContinuousClock.now.duration(to: deadline)
+        guard remaining > .zero else {
+            await onOperationSettled?()
+            return invokeTimeoutResponse(requestId: request.id)
+        }
+        let components = remaining.components
+        let remainingMs = max(
+            1,
+            Int(components.seconds) * 1000 +
+                Int(components.attoseconds / 1_000_000_000_000_000))
+        return await invokeWithTimeout(
+            request: request,
+            timeoutMs: remainingMs,
+            onInvoke: onInvoke,
+            onOperationSettled: onOperationSettled)
     }
 
     #if DEBUG
