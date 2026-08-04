@@ -148,13 +148,12 @@ export function createEmbeddedRunLaneController<TParams extends LaneParams>(opti
         }
         lifecycleGeneration = currentLifecycleGeneration;
         options.setLifecycleGeneration(lifecycleGeneration);
+        // Lifecycle rebound preserves the admitted identity snapshot, including
+        // authoritative absence; only a fresh admission may replace identity.
         const attribution = params.attribution
           ? createAgentExecutionAttribution({
               ...params.attribution,
               lifecycleGeneration,
-              sessionKey: params.sessionKey,
-              sessionId: params.sessionId,
-              agentId: params.agentId,
             })
           : undefined;
         params = {

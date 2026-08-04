@@ -147,6 +147,35 @@ describe("createEmbeddedRunLaneController lifecycle admission", () => {
     });
   });
 
+  it("preserves absent attribution identity when queued foreground work rebinds", async () => {
+    const queue = deferredTaskQueue();
+    const generation = getAgentEventLifecycleGeneration();
+    const attribution = createAgentExecutionAttribution({
+      runId: "queued-sparse-attribution",
+      lifecycleGeneration: generation,
+    });
+    const state = createController({
+      lifecycleGeneration: generation,
+      enqueue: queue.enqueue as LaneParams["enqueue"],
+      trigger: "user",
+      runId: "queued-sparse-attribution",
+      attribution,
+    });
+    const run = state.controller.enqueueGlobal(async () => completedResult);
+
+    const currentGeneration = rotateAgentEventLifecycleGeneration();
+    queue.release();
+    await run;
+
+    expect(state.getParams().attribution).toEqual({
+      runId: "queued-sparse-attribution",
+      lifecycleGeneration: currentGeneration,
+    });
+    expect(state.getParams().attribution).not.toHaveProperty("sessionKey");
+    expect(state.getParams().attribution).not.toHaveProperty("sessionId");
+    expect(state.getParams().attribution).not.toHaveProperty("agentId");
+  });
+
   it("rejects background work queued across lifecycle rotation", async () => {
     const queue = deferredTaskQueue();
     const generation = getAgentEventLifecycleGeneration();

@@ -191,9 +191,6 @@ export async function runCliFallbackCandidate(params: {
               ? createAgentExecutionAttribution({
                   ...turn.attribution,
                   lifecycleGeneration,
-                  sessionKey: turn.sessionKey,
-                  sessionId: turn.followupRun.run.sessionId,
-                  agentId: turn.followupRun.run.agentId,
                 })
               : undefined;
         if (lifecycleGeneration !== params.getLifecycleGeneration()) {

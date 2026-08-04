@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
+import { createAgentExecutionAttribution } from "../../agents/agent-execution-attribution.js";
 import { testing as cliBackendsTesting } from "../../agents/cli-backends.test-support.js";
 import { installSessionPlacementAdmissionProvider } from "../../agents/session-placement-admission.js";
 import type { SessionEntry } from "../../config/sessions.js";
-import { rotateAgentEventLifecycleGeneration } from "../../infra/agent-events.js";
+import {
+  getAgentEventLifecycleGeneration,
+  rotateAgentEventLifecycleGeneration,
+} from "../../infra/agent-events.js";
 import type { TemplateContext } from "../templating.js";
 import {
   setupAgentRunnerExecutionTestState,
@@ -207,6 +211,50 @@ describe("executeAgentTurn: runtime selection", () => {
         lifecycleGeneration: rotatedGeneration,
       }),
     });
+  });
+
+  it("preserves absent attribution identity while rebasing direct CLI execution", async () => {
+    state.isCliProviderMock.mockReturnValue(true);
+    let rotatedGeneration = "";
+    state.runWithModelFallbackMock.mockImplementationOnce(async (params: FallbackRunnerParams) => {
+      rotatedGeneration = rotateAgentEventLifecycleGeneration();
+      return {
+        result: await params.run("codex-cli", "gpt-5.4"),
+        provider: "codex-cli",
+        model: "gpt-5.4",
+        attempts: [],
+      };
+    });
+    state.runCliAgentMock.mockResolvedValueOnce({
+      payloads: [{ text: "final" }],
+      meta: {},
+    });
+    const runId = "cli-sparse-attribution";
+    const attribution = createAgentExecutionAttribution({
+      runId,
+      lifecycleGeneration: getAgentEventLifecycleGeneration(),
+    });
+    const executeAgentTurn = await getExecuteAgentTurnForTest();
+    const followupRun = createFollowupRun();
+    followupRun.run.provider = "codex-cli";
+    followupRun.run.model = "gpt-5.4";
+
+    await executeAgentTurn({
+      ...createMinimalRunAgentTurnParams({ followupRun, opts: { runId } }),
+      attribution,
+    });
+
+    const cliParams = requireRecord(
+      requireMockCall(state.runCliAgentMock, 0, "CLI run")[0],
+      "CLI run params",
+    );
+    expect(cliParams.attribution).toEqual({
+      runId,
+      lifecycleGeneration: rotatedGeneration,
+    });
+    expect(cliParams.attribution).not.toHaveProperty("sessionKey");
+    expect(cliParams.attribution).not.toHaveProperty("sessionId");
+    expect(cliParams.attribution).not.toHaveProperty("agentId");
   });
 
   it("rejects queued heartbeat CLI fallback after placement crosses a lifecycle rotation", async () => {
