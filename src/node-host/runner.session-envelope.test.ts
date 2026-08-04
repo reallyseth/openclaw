@@ -219,6 +219,85 @@ describe("node-host session envelope negotiation", () => {
     );
   });
 
+  it("does not let negotiation block explicit envelopes or unrelated controls", async () => {
+    const dateNowSpy = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    try {
+      const { options, client } = await startFakeNodeHost();
+      const resolveNegotiation = deferNegotiation(client);
+
+      hello(options);
+      options?.onEvent?.({
+        type: "event",
+        event: "node.invoke.request",
+        payload: {
+          id: "invoke-awaiting-negotiation",
+          nodeId: "node-1",
+          command: "system.run",
+        },
+      });
+      options?.onEvent?.({
+        type: "event",
+        event: "node.invoke.request",
+        payload: {
+          id: "invoke-explicit-envelope",
+          nodeId: "node-1",
+          command: "system.run",
+          timeoutMs: 10,
+          sessionKey: "agent:main:explicit",
+        },
+      });
+      options?.onEvent?.({
+        type: "event",
+        event: "node.invoke.input",
+        payload: {
+          id: "invoke-explicit-envelope",
+          nodeId: "node-1",
+          seq: 1,
+          payloadJSON: '{"kind":"data"}',
+        },
+      });
+      options?.onEvent?.({
+        type: "event",
+        event: "node.invoke.cancel",
+        payload: {
+          invokeId: "invoke-already-running",
+          nodeId: "node-1",
+        },
+      });
+
+      await vi.waitFor(() => {
+        expect(mocks.activeRuntime.invoke).toHaveBeenCalledTimes(1);
+        expect(mocks.activeRuntime.invoke).toHaveBeenLastCalledWith(
+          expect.objectContaining({
+            id: "invoke-explicit-envelope",
+            sessionKey: "agent:main:explicit",
+            timeoutMs: 10,
+          }),
+        );
+        expect(mocks.activeRuntime.handleInput).toHaveBeenCalledWith(
+          "invoke-explicit-envelope",
+          1,
+          '{"kind":"data"}',
+        );
+        expect(mocks.activeRuntime.cancel).toHaveBeenCalledWith("invoke-already-running");
+      });
+      expect(mocks.activeRuntime.invoke.mock.invocationCallOrder[0]).toBeLessThan(
+        mocks.activeRuntime.handleInput.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+      );
+      resolveNegotiation();
+      await vi.waitFor(() => {
+        expect(mocks.activeRuntime.invoke).toHaveBeenCalledWith(
+          expect.objectContaining({
+            id: "invoke-awaiting-negotiation",
+            sessionKey: null,
+          }),
+        );
+      });
+    } finally {
+      dateNowSpy.mockRestore();
+    }
+  });
+
   it("charges negotiation against the invoke deadline", async () => {
     const dateNowSpy = vi.spyOn(Date, "now");
     let nowMs = 1_000;

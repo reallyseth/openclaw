@@ -258,14 +258,18 @@ export async function runNodeHost(opts: NodeHostRunOptions): Promise<void> {
   let gatewayConnectionGeneration = 0;
   let nodeInvokeSessionEnvelopeMode =
     Promise.resolve<NodeInvokeSessionEnvelopeMode>("authoritative");
-  let nodeInvokeEventDispatch = Promise.resolve();
+  const nodeInvokeEventDispatchByInvokeId = new Map<string, Promise<void>>();
   // Cancellation can arrive while feature negotiation blocks dispatch. Mark it
   // immediately so the queued invoke cannot start before its queued cancel runs.
   const queuedNodeInvokeCancellations = new Set<string>();
-  const queueNodeInvokeEvent = (dispatch: (mode: NodeInvokeSessionEnvelopeMode) => void): void => {
+  const queueNodeInvokeEvent = (
+    invokeId: string,
+    dispatch: (mode: NodeInvokeSessionEnvelopeMode) => void,
+    envelopeMode: Promise<NodeInvokeSessionEnvelopeMode> = Promise.resolve("authoritative"),
+  ): void => {
     const connectionGeneration = gatewayConnectionGeneration;
-    const envelopeMode = nodeInvokeSessionEnvelopeMode;
-    nodeInvokeEventDispatch = nodeInvokeEventDispatch
+    const previous = nodeInvokeEventDispatchByInvokeId.get(invokeId) ?? Promise.resolve();
+    const queued = previous
       .then(async () => {
         const mode = await envelopeMode;
         if (connectionGeneration === gatewayConnectionGeneration) {
@@ -275,6 +279,12 @@ export async function runNodeHost(opts: NodeHostRunOptions): Promise<void> {
       .catch((error: unknown) => {
         writeStderrLine(`node host invoke event dispatch failed: ${String(error)}`);
       });
+    nodeInvokeEventDispatchByInvokeId.set(invokeId, queued);
+    void queued.then(() => {
+      if (nodeInvokeEventDispatchByInvokeId.get(invokeId) === queued) {
+        nodeInvokeEventDispatchByInvokeId.delete(invokeId);
+      }
+    });
   };
 
   const publishInventory = () => {
@@ -313,7 +323,7 @@ export async function runNodeHost(opts: NodeHostRunOptions): Promise<void> {
         const payload = coerceNodeInvokeCancelPayload(evt.payload);
         if (payload) {
           queuedNodeInvokeCancellations.add(payload.invokeId);
-          queueNodeInvokeEvent(() => {
+          queueNodeInvokeEvent(payload.invokeId, () => {
             activeRuntime.cancel(payload.invokeId);
             queuedNodeInvokeCancellations.delete(payload.invokeId);
           });
@@ -323,7 +333,7 @@ export async function runNodeHost(opts: NodeHostRunOptions): Promise<void> {
       if (evt.event === "node.invoke.input") {
         const payload = coerceNodeInvokeInputPayload(evt.payload);
         if (payload) {
-          queueNodeInvokeEvent(() => {
+          queueNodeInvokeEvent(payload.invokeId, () => {
             activeRuntime.handleInput(payload.invokeId, payload.seq, payload.payloadJSON);
           });
         }
@@ -337,33 +347,38 @@ export async function runNodeHost(opts: NodeHostRunOptions): Promise<void> {
         return;
       }
       const receivedAtMs = Date.now();
-      queueNodeInvokeEvent((mode) => {
-        if (queuedNodeInvokeCancellations.delete(payload.id)) {
-          return;
-        }
-        // The Gateway sends non-empty attribution to every node immediately;
-        // negotiation gates only the explicit null clear for unattributed invokes.
-        let invokePayload: NodeInvokeRequestPayload =
-          mode === "authoritative" && !Object.hasOwn(payload, "sessionKey")
-            ? { ...payload, sessionKey: null }
-            : payload;
-        if (typeof invokePayload.timeoutMs === "number" && invokePayload.timeoutMs > 0) {
-          // The Gateway sends its remaining deadline budget. Charge negotiation
-          // time here so delayed state-changing commands cannot run after expiry.
-          const elapsedMs = Math.max(0, Date.now() - receivedAtMs);
-          const remainingTimeoutMs = Math.max(0, invokePayload.timeoutMs - elapsedMs);
-          if (remainingTimeoutMs === 0) {
+      const hasSessionKeyEnvelope = Object.hasOwn(payload, "sessionKey");
+      queueNodeInvokeEvent(
+        payload.id,
+        (mode) => {
+          if (queuedNodeInvokeCancellations.delete(payload.id)) {
             return;
           }
-          invokePayload = { ...invokePayload, timeoutMs: remainingTimeoutMs };
-        }
-        void activeRuntime.invoke(invokePayload);
-      });
+          // The Gateway sends non-empty attribution to every node immediately;
+          // negotiation gates only the explicit null clear for unattributed invokes.
+          let invokePayload: NodeInvokeRequestPayload =
+            mode === "authoritative" && !hasSessionKeyEnvelope
+              ? { ...payload, sessionKey: null }
+              : payload;
+          if (typeof invokePayload.timeoutMs === "number" && invokePayload.timeoutMs > 0) {
+            // The Gateway sends its remaining deadline budget. Charge negotiation
+            // time here so delayed state-changing commands cannot run after expiry.
+            const elapsedMs = Math.max(0, Date.now() - receivedAtMs);
+            const remainingTimeoutMs = Math.max(0, invokePayload.timeoutMs - elapsedMs);
+            if (remainingTimeoutMs === 0) {
+              return;
+            }
+            invokePayload = { ...invokePayload, timeoutMs: remainingTimeoutMs };
+          }
+          void activeRuntime.invoke(invokePayload);
+        },
+        hasSessionKeyEnvelope ? Promise.resolve("authoritative") : nodeInvokeSessionEnvelopeMode,
+      );
     },
     onHelloOk: () => {
       writeStderrLine(`node host gateway connected: ${url}`);
       gatewayConnectionGeneration += 1;
-      nodeInvokeEventDispatch = Promise.resolve();
+      nodeInvokeEventDispatchByInvokeId.clear();
       queuedNodeInvokeCancellations.clear();
       gatewayHelloReceived = true;
       nodeInvokeSessionEnvelopeMode = negotiateNodeInvokeSessionEnvelope(client);
@@ -385,7 +400,7 @@ export async function runNodeHost(opts: NodeHostRunOptions): Promise<void> {
     },
     onClose: (code, reason) => {
       gatewayConnectionGeneration += 1;
-      nodeInvokeEventDispatch = Promise.resolve();
+      nodeInvokeEventDispatchByInvokeId.clear();
       queuedNodeInvokeCancellations.clear();
       gatewayHelloReceived = false;
       nodeInvokeSessionEnvelopeMode = Promise.resolve("authoritative");
