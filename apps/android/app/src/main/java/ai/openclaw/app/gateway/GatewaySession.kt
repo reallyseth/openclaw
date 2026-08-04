@@ -1804,8 +1804,30 @@ class GatewaySession(
           if (hasWireSessionKey) {
             NodeInvokeSessionEnvelopeMode.AUTHORITATIVE
           } else {
-            nodeInvokeSessionEnvelopeMode.await()
+            val timeoutMs = resolveInvokeExecutionTimeoutMs(payload.timeoutMs)
+            if (timeoutMs == null) {
+              nodeInvokeSessionEnvelopeMode.await()
+            } else {
+              val elapsedMs = (SystemClock.elapsedRealtime() - receivedAtMs).coerceAtLeast(0L)
+              val remainingTimeoutMs = timeoutMs - elapsedMs
+              if (remainingTimeoutMs <= 0L) {
+                null
+              } else {
+                // Negotiation is connection-owned; timing out this waiter must not cancel the
+                // shared deferred that determines envelope mode for later invokes.
+                withTimeoutOrNull(remainingTimeoutMs) { nodeInvokeSessionEnvelopeMode.await() }
+              }
+            }
           }
+        if (envelopeMode == null) {
+          sendInvokeResult(
+            payload.id,
+            payload.nodeId,
+            InvokeResult.error("TIMEOUT", "node invoke timed out"),
+            payload.timeoutMs,
+          )
+          return@launch
+        }
         val hasSessionKeyEnvelope =
           hasWireSessionKey || envelopeMode == NodeInvokeSessionEnvelopeMode.AUTHORITATIVE
         val request =

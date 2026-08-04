@@ -1197,12 +1197,31 @@ extension GatewayNodeSession {
         }
         let decodedRequest = evt.payload.flatMap { try? self.decodeInvokeRequest(from: $0) }
         let hasWireSessionKey = decodedRequest?.hasSessionKeyEnvelope == true
-        let envelopeMode =
+        let envelopeModeTask =
             hasWireSessionKey
                 ? Task { .authoritative }
                 : self.nodeInvokeSessionEnvelopeMode ?? Task { .authoritative }
         Task { [weak self] in
-            let mode = await envelopeMode.value
+            let mode: NodeInvokeSessionEnvelopeMode = if hasWireSessionKey {
+                .authoritative
+            } else {
+                switch Self.invokeTimeoutBudget(
+                    timeoutMs: decodedRequest?.timeoutMs,
+                    receivedAt: receivedAt)
+                {
+                case .disabled:
+                    await envelopeModeTask.value
+                case .expired:
+                    .authoritative
+                case let .remaining(remaining):
+                    // Negotiation is socket-owned, but each invoke keeps its own deadline.
+                    // Cancelling this waiter must not cancel the shared negotiation task.
+                    await (try? AsyncTimeout.withTimeoutMs(
+                        timeoutMs: remaining,
+                        onTimeout: { CancellationError() },
+                        operation: { await envelopeModeTask.value })) ?? .authoritative
+                }
+            }
             guard !Task.isCancelled, let self else { return }
             await self.handleAdmittedNodeInvokeEvent(
                 evt,

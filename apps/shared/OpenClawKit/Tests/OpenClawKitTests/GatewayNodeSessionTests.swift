@@ -2615,7 +2615,7 @@ struct GatewayNodeSessionTests {
     @Test
     func `node invoke negotiation time consumes the request deadline`() async throws {
         let session = FakeGatewayWebSocketSession(
-            protocolFeaturesResponseDelay: .milliseconds(100))
+            protocolFeaturesResponseDelay: .seconds(2))
         let gateway = GatewayNodeSession()
         let capture = SessionKeyEnvelopeCapture()
         let options = GatewayConnectOptions(
@@ -2649,8 +2649,8 @@ struct GatewayNodeSessionTests {
             id: "expired",
             command: "mcp.tools.call.v1",
             paramsJSON: "{}",
-            timeoutMs: 10)
-        try await waitUntil("expired invoke result") {
+            timeoutMs: 50)
+        try await waitUntil("expired invoke result", timeoutSeconds: 1) {
             task.sentRequestCount(method: "node.invoke.result") == 1
         }
 

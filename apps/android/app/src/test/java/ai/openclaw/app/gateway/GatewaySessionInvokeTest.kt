@@ -35,8 +35,6 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
-import org.robolectric.shadows.ShadowSystemClock
-import java.time.Duration
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -1082,19 +1080,25 @@ class GatewaySessionInvokeTest {
       val invokeResultParams = CompletableDeferred<JsonObject>()
       val invokeCalls = AtomicInteger()
       val lastDisconnect = AtomicReference("")
+      val invokeSentAtNanos = AtomicReference<Long>()
       val server =
         startGatewayServer(json) { webSocket, id, method, frame ->
           when (method) {
             "connect" -> {
               webSocket.send(connectResponseFrame(id))
+              invokeSentAtNanos.set(System.nanoTime())
               webSocket.send(
                 """{"type":"event","event":"node.invoke.request","payload":{"id":"invoke-expired","nodeId":"node-1","command":"debug.ping","timeoutMs":50}}""",
               )
             }
             "node.protocolFeatures.update" -> {
-              Thread.sleep(150)
-              ShadowSystemClock.advanceBy(Duration.ofMillis(150))
-              webSocket.send("""{"type":"res","id":"$id","ok":true,"payload":{"ok":true}}""")
+              Thread {
+                Thread.sleep(2_000)
+                webSocket.send("""{"type":"res","id":"$id","ok":true,"payload":{"ok":true}}""")
+              }.apply {
+                isDaemon = true
+                start()
+              }
             }
             "node.invoke.result" -> {
               invokeResultParams.complete(frame["params"]?.jsonObject ?: JsonObject(emptyMap()))
@@ -1111,9 +1115,14 @@ class GatewaySessionInvokeTest {
       try {
         connectNodeSession(harness.session, server.port)
         awaitConnectedOrThrow(connected, lastDisconnect, server)
-        val result = withTimeout(TEST_TIMEOUT_MS) { invokeResultParams.await() }
+        val result = withTimeout(1_000) { invokeResultParams.await() }
 
         assertEquals(0, invokeCalls.get())
+        assertTrue(
+          TimeUnit.NANOSECONDS.toMillis(
+            System.nanoTime() - checkNotNull(invokeSentAtNanos.get()),
+          ) < 1_000,
+        )
         assertEquals(false, result["ok"]?.jsonPrimitive?.content?.toBooleanStrict())
         assertEquals(
           "TIMEOUT",
