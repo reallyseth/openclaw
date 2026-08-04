@@ -18,8 +18,11 @@ const delegatedInferenceMocks = vi.hoisted(() => ({
 }));
 const transcriptStoreMocks = vi.hoisted(() => ({
   appendTranscriptReset: vi.fn(),
-  appendTranscriptTurn: vi.fn(),
-  readTranscriptTail: vi.fn(() => []),
+  appendTranscriptTurn:
+    vi.fn<(turn: { role: "user" | "assistant" | "reset"; text: string; at: number }) => void>(),
+  readTranscriptTail: vi.fn<() => Array<{ role: "user" | "assistant"; text: string; at: number }>>(
+    () => [],
+  ),
 }));
 
 vi.mock("../../system-agent/setup-inference.js", () => ({
@@ -171,6 +174,8 @@ async function callHistory(
 
 beforeEach(() => {
   createdEngines.length = 0;
+  transcriptStoreMocks.appendTranscriptTurn.mockImplementation(() => undefined);
+  transcriptStoreMocks.readTranscriptTail.mockImplementation(() => []);
   setupInferenceMocks.verifySetupInference.mockResolvedValue({ ok: true, binding: {} });
   delegatedInferenceMocks.verifySystemAgentInferenceWithFallback.mockResolvedValue({
     ok: true,
@@ -388,6 +393,21 @@ describe("openclaw.chat session responses", () => {
       });
       return { text: "Enter the secret.", action: "none" };
     });
+    const persistedTurns: Array<{
+      role: "user" | "assistant";
+      text: string;
+      at: number;
+    }> = [];
+    engine.historySince.mockReturnValue([
+      { role: "user", text: "twitch" },
+      { role: "assistant", text: "Enter the secret." },
+    ]);
+    transcriptStoreMocks.appendTranscriptTurn.mockImplementation((turn) => {
+      if (turn.role !== "reset") {
+        persistedTurns.push({ role: turn.role, text: turn.text, at: turn.at });
+      }
+    });
+    transcriptStoreMocks.readTranscriptTail.mockImplementation(() => [...persistedTurns]);
     const sessions = new Map<string, SystemAgentChatSession>([
       ["s1", seededSession({ engine, ownerKey: "device:device-owner" })],
     ]);
@@ -412,7 +432,13 @@ describe("openclaw.chat session responses", () => {
     await answer;
     expect(await history).toMatchObject({
       ok: true,
-      payload: { session: { sessionId: "s1", step: { id: "secret", sensitive: true } } },
+      payload: {
+        turns: [
+          { role: "user", text: "twitch" },
+          { role: "assistant", text: "Enter the secret." },
+        ],
+        session: { sessionId: "s1", step: { id: "secret", sensitive: true } },
+      },
     });
   });
 
@@ -465,6 +491,7 @@ describe("openclaw.chat session responses", () => {
         setTimeout(() => resolve("blocked"), 10);
       }),
     ]);
+    expect(transcriptStoreMocks.readTranscriptTail).not.toHaveBeenCalled();
 
     expectDefined(releaseBlocker, "gateway blocker release")();
     await blocker;
@@ -474,7 +501,10 @@ describe("openclaw.chat session responses", () => {
     expect(admissionOrder).toBe("blocked");
     expect(recovered).toMatchObject({
       ok: true,
-      payload: { session: { sessionId: "s1", step: { id: "secret", sensitive: true } } },
+      payload: {
+        turns: [],
+        session: { sessionId: "s1", step: { id: "secret", sensitive: true } },
+      },
     });
   });
 

@@ -242,14 +242,16 @@ export const systemAgentHandlers: GatewayRequestHandlers = {
     ) {
       return;
     }
-    const turns = readTranscriptTail(params.limit ?? DEFAULT_SYSTEM_AGENT_HISTORY_LIMIT);
     if (!params.sessionId) {
-      respond(true, { turns });
+      respond(true, {
+        turns: readTranscriptTail(params.limit ?? DEFAULT_SYSTEM_AGENT_HISTORY_LIMIT),
+      });
       return;
     }
     await getSystemAgentSessionQueue(context.systemAgentSessions).enqueue(
       params.sessionId,
       async () => {
+        const turns = readTranscriptTail(params.limit ?? DEFAULT_SYSTEM_AGENT_HISTORY_LIMIT);
         const session = resolveSystemAgentHistorySession({
           requestedSessionId: params.sessionId,
           sessions: context.systemAgentSessions,
