@@ -164,6 +164,10 @@ struct OpenClawLiveActivity: Widget {
             OpenClawActivityStyle.coral
         case .voiceListening, .voiceActive:
             OpenClawActivityStyle.sea
+        case .siriQuery:
+            OpenClawActivityStyle.info
+        case .siriResult:
+            OpenClawActivityStyle.ok
         default:
             nil
         }
@@ -199,6 +203,12 @@ struct OpenClawLiveActivity: Widget {
         case .voiceActive:
             Image(systemName: "waveform")
                 .foregroundStyle(OpenClawActivityStyle.sea)
+        case .siriQuery:
+            Image(systemName: "bubble.left.fill")
+                .foregroundStyle(OpenClawActivityStyle.info)
+        case .siriResult:
+            Image(systemName: "checkmark.bubble.fill")
+                .foregroundStyle(OpenClawActivityStyle.ok)
         }
     }
 
@@ -223,6 +233,18 @@ struct OpenClawLiveActivity: Widget {
         case .paused: Text("Paused")
         case .idle: Text("Connected")
         case .disconnected: Text("Disconnected")
+        case .siriQuery:
+            if let detail = state.verbatimDetail {
+                Text(verbatim: detail)
+            } else {
+                Text("Thinking…")
+            }
+        case .siriResult:
+            if let detail = state.verbatimDetail {
+                Text(verbatim: detail)
+            } else {
+                Text("Response ready")
+            }
         }
     }
 
@@ -232,7 +254,8 @@ struct OpenClawLiveActivity: Widget {
         guard context.isStale else { return context.state }
         switch context.state.status {
         case .connecting, .reconnecting, .approvalNeeded, .actionRequired, .attention,
-             .toolRunning, .voiceListening, .voiceSpeaking, .voiceActive:
+             .toolRunning, .voiceListening, .voiceSpeaking, .voiceActive,
+             .siriQuery, .siriResult:
             return OpenClawActivityAttributes.ContentState(
                 status: .paused,
                 verbatimDetail: nil,

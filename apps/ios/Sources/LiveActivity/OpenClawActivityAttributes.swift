@@ -20,6 +20,8 @@ struct OpenClawActivityAttributes: ActivityAttributes {
             case paused
             case idle
             case disconnected
+            case siriQuery
+            case siriResult
         }
 
         var status: Status

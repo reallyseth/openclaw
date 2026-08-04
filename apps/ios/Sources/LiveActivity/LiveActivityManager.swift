@@ -205,6 +205,54 @@ final class LiveActivityManager {
     }
     #endif
 
+    // MARK: - Siri
+
+    /// Shows a Siri query Live Activity ("Thinking…") with the user's message preview.
+    func showSiriQuery(
+        message preview: String,
+        agentName: String,
+        sessionKey: String)
+    {
+        let truncated = String(preview.prefix(100))
+        let detail = truncated.isEmpty ? nil : truncated
+        let state = OpenClawActivityAttributes.ContentState(
+            status: .siriQuery,
+            verbatimDetail: detail,
+            startedAt: .now)
+        self.arbiter.setAttention(self.request(
+            state: state,
+            staleAfter: self.transientStaleSeconds,
+            agentName: agentName,
+            sessionKey: sessionKey))
+        self.reconcile(reason: "siri_query")
+    }
+
+    /// Shows the Siri result preview in the Live Activity.
+    func showSiriResult(
+        preview: String,
+        agentName: String,
+        sessionKey: String)
+    {
+        let truncated = String(preview.prefix(150))
+        let detail = truncated.isEmpty ? nil : truncated
+        let state = OpenClawActivityAttributes.ContentState(
+            status: .siriResult,
+            verbatimDetail: detail,
+            startedAt: .now)
+        self.arbiter.setAttention(self.request(
+            state: state,
+            staleAfter: self.transientStaleSeconds,
+            agentName: agentName,
+            sessionKey: sessionKey))
+        self.reconcile(reason: "siri_result")
+    }
+
+    /// Dismisses any Siri-owned Live Activity state.
+    func endSiriActivity() {
+        self.arbiter.setAttention(nil)
+        self.reconcile(reason: "siri_end")
+    }
+
     func handleReconnect() {
         self.arbiter.clearConnectionState()
         self.reconcile(reason: "connected")
@@ -478,6 +526,8 @@ final class LiveActivityManager {
             // lowest-priority fallback until a live producer replaces it.
             request.staleDate = Date().addingTimeInterval(self.transientStaleSeconds)
             self.arbiter.adoptInitialHydratedToolFallback(request)
+        case .siriQuery, .siriResult:
+            self.arbiter.setAttention(request)
         case .connecting, .reconnecting, .paused:
             self.arbiter.setConnection(request)
         case .idle, .disconnected:
@@ -510,6 +560,8 @@ final class LiveActivityManager {
             return true
         case .voiceActive, .voiceListening, .voiceSpeaking, .toolRunning:
             return staleDate != nil || now.timeIntervalSince(startedAt) < maximumStartAge
+        case .siriQuery, .siriResult:
+            return true
         case .connecting, .reconnecting, .paused:
             return now.timeIntervalSince(startedAt) < maximumStartAge
         case .idle, .disconnected:
