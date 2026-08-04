@@ -3594,6 +3594,30 @@ public struct NodeInvokeRequestEvent: Codable, Sendable {
         case idempotencykey = "idempotencyKey"
         case sessionkey = "sessionKey"
     }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(String.self, forKey: .id)
+        self.nodeid = try container.decode(String.self, forKey: .nodeid)
+        self.command = try container.decode(String.self, forKey: .command)
+        self.paramsjson = try container.decodeIfPresent(String.self, forKey: .paramsjson)
+        self.timeoutms = try container.decodeIfPresent(Int.self, forKey: .timeoutms)
+        self.idempotencykey = try container.decodeIfPresent(String.self, forKey: .idempotencykey)
+        self.sessionkey = container.contains(.sessionkey)
+            ? try container.decode(AnyCodable.self, forKey: .sessionkey)
+            : nil
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(nodeid, forKey: .nodeid)
+        try container.encode(command, forKey: .command)
+        try container.encodeIfPresent(paramsjson, forKey: .paramsjson)
+        try container.encodeIfPresent(timeoutms, forKey: .timeoutms)
+        try container.encodeIfPresent(idempotencykey, forKey: .idempotencykey)
+        try container.encodeIfPresent(sessionkey, forKey: .sessionkey)
+    }
 }
 
 public struct NodeEventParams: Codable, Sendable {
