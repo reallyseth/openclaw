@@ -2,7 +2,9 @@
 
 import { expectDefined } from "@openclaw/normalization-core";
 import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
+import { getCommandLaneSnapshot } from "../../process/command-queue.js";
 import { resetCommandQueueStateForTest } from "../../process/command-queue.test-support.js";
+import { CommandLane } from "../../process/lanes.js";
 import {
   SystemAgentWizardAnswerError,
   SystemAgentWizardCancelError,
@@ -453,6 +455,9 @@ describe("openclaw.chat session responses", () => {
       sessionId: "s1",
       wizardAnswer: { stepId: "channel", value: "twitch" },
     });
+    await vi.waitFor(() =>
+      expect(getCommandLaneSnapshot(CommandLane.SystemAgent).activeCount).toBe(2),
+    );
     const history = callHistory(context, { sessionId: "s1" });
     const admissionOrder = await Promise.race([
       history.then(() => "history" as const),

@@ -581,16 +581,8 @@ export class CustodianSessionStore {
       }
       const step = history.session.step ?? null;
       if (step) {
-        const lastAssistantIndex = this.messages.findLastIndex(
-          (message) => message.role === "assistant",
-        );
-        if (lastAssistantIndex === -1) {
-          this.appendAssistant("", null, step);
-        } else {
-          this.messages = this.messages.map((message, index) =>
-            index === lastAssistantIndex ? { ...message, step } : message,
-          );
-        }
+        // The transcript is machine-wide, so its last row may belong to another session.
+        this.appendAssistant("", null, step);
       }
       this.sensitive = step?.sensitive === true;
       this.wizardInputPending = step !== null;

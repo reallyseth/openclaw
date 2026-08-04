@@ -115,6 +115,32 @@ describe("custodian session recovery", () => {
     });
   });
 
+  it("keeps a restored control separate from another session's transcript tail", async () => {
+    writeCustodianSessionPointer("ws://gateway.test/control", "onboarding", "interleaved-session");
+    const request = vi.fn().mockResolvedValue({
+      turns: [{ role: "assistant", text: "Another session finished setup.", at: 1 }],
+      session: {
+        sessionId: "interleaved-session",
+        step: {
+          id: "secret",
+          type: "text",
+          message: "Twitch client secret",
+          sensitive: true,
+        },
+      },
+    });
+    const { context } = createContext(request, ["openclaw.chat", "openclaw.chat.history"]);
+    const { page } = await mountPage(context);
+
+    await waitForFast(() =>
+      expect(page.querySelector<HTMLInputElement>(".custodian__wizard-step input")).not.toBeNull(),
+    );
+    expect(page.store.messages).toMatchObject([
+      { text: "Another session finished setup.", step: null },
+      { text: "", step: { id: "secret" } },
+    ]);
+  });
+
   it("keeps a stored live session retryable when history is temporarily unavailable", async () => {
     writeCustodianSessionPointer(
       "ws://gateway.test/control",
