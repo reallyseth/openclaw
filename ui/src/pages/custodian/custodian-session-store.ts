@@ -142,7 +142,6 @@ export class CustodianSessionStore {
   hasRealUserTurn(): boolean {
     return this.messages.some((message) => message.role === "user");
   }
-
   get activeVariant(): CustodianSessionVariant {
     return this.variant;
   }
@@ -160,7 +159,6 @@ export class CustodianSessionStore {
   canRetry(): boolean {
     return this.retryParams !== null && !hasCustodianUserInput(this.retryParams);
   }
-
   get setupRequired(): boolean {
     return this.setupIssue !== null;
   }
@@ -522,11 +520,11 @@ export class CustodianSessionStore {
     this.retryParams = params;
     this.emit();
     if (loadTranscript) {
-      const restored = await this.refreshTranscriptHistory(client, epoch);
-      if (restored) {
+      const historyResult = await this.refreshTranscriptHistory(client, epoch);
+      if (historyResult !== "continue") {
         if (epoch === this.requestEpoch && client === this.activeClient) {
           this.sending = false;
-          this.retryParams = null;
+          this.retryParams = historyResult === "restored" ? null : this.retryParams;
           this.emit();
         }
         return;
@@ -545,29 +543,29 @@ export class CustodianSessionStore {
   private async refreshTranscriptHistory(
     client: GatewayBrowserClient,
     epoch: number,
-  ): Promise<boolean> {
+  ): Promise<"continue" | "failed" | "restored"> {
     const context = this.context;
     if (
       !context ||
       isGatewayMethodAdvertised(context.gateway.snapshot, "openclaw.chat.history") !== true
     ) {
-      return false;
+      return "continue";
     }
-    const history = await readCustodianTranscript(
+    const historyResult = await readCustodianTranscript(
       client,
       this.sessionRestorePending ? this.sessionId : undefined,
     );
     if (epoch !== this.requestEpoch || client !== this.activeClient) {
-      return false;
+      return "continue";
     }
-    if (history === null) {
+    if (!historyResult.ok) {
       if (this.sessionRestorePending) {
-        clearCustodianSessionPointer(context.gateway.connection.gatewayUrl, this.variant);
-        this.sessionId = createCustodianSessionId();
-        this.sessionRestorePending = false;
+        this.error = custodianErrorMessage(historyResult.error);
+        return "failed";
       }
-      return false;
+      return "continue";
     }
+    const history = historyResult.history;
     const transcript = createCustodianTranscriptMessages(history.turns, this.nextMessageId);
     this.messages = transcript.messages;
     this.nextMessageId = transcript.nextMessageId;
@@ -579,7 +577,7 @@ export class CustodianSessionStore {
         clearCustodianSessionPointer(gatewayUrl, this.variant);
         this.sessionId = createCustodianSessionId();
         this.emit();
-        return false;
+        return "continue";
       }
       const step = history.session.step ?? null;
       if (step) {
@@ -599,10 +597,10 @@ export class CustodianSessionStore {
       this.wizardValue = step ? initialCustodianWizardValue(step) : undefined;
       this.wizardSecretVisible = false;
       this.emit();
-      return true;
+      return "restored";
     }
     this.emit();
-    return false;
+    return "continue";
   }
 
   private clearConversation(): void {

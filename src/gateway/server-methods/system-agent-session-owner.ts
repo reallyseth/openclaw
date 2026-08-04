@@ -1,9 +1,26 @@
+import { KeyedAsyncQueue } from "../../plugin-sdk/keyed-async-queue.js";
 import { resolveSystemAgentDelegationKey } from "../../system-agent/delegation-session.js";
 import { acknowledgeSystemAgentGreetingDelivery } from "../../system-agent/greeting.js";
 import type { GatewayClient, GatewayRequestContext } from "./types.js";
 
 type SystemAgentChatSession =
   GatewayRequestContext["systemAgentSessions"] extends Map<string, infer Session> ? Session : never;
+
+const systemAgentSessionQueues = new WeakMap<
+  Map<string, SystemAgentChatSession>,
+  KeyedAsyncQueue
+>();
+
+export function getSystemAgentSessionQueue(
+  sessions: Map<string, SystemAgentChatSession>,
+): KeyedAsyncQueue {
+  let queue = systemAgentSessionQueues.get(sessions);
+  if (!queue) {
+    queue = new KeyedAsyncQueue();
+    systemAgentSessionQueues.set(sessions, queue);
+  }
+  return queue;
+}
 
 export function resolveSystemAgentSessionOwnerKey(params: {
   delegation?: { agentId?: string; sessionKey?: string };

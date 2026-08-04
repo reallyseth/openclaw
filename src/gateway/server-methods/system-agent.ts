@@ -57,6 +57,7 @@ import {
 } from "./system-agent-chat-turn.js";
 import {
   acknowledgeDeliveredSystemAgentWelcome,
+  getSystemAgentSessionQueue,
   resolveSystemAgentHistorySession,
   resolveSystemAgentSessionOwnerKey,
 } from "./system-agent-session-owner.js";
@@ -83,21 +84,6 @@ const PROVIDER_AUTH_SESSION_TIMEOUT_MS = 25 * 60 * 1000;
 const PROVIDER_PREPARE_SESSION_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 const SYSTEM_AGENT_GATEWAY_EXECUTION_KEY = "gateway";
 const systemAgentGatewayExecutionQueue = new KeyedAsyncQueue();
-const systemAgentSessionQueues = new WeakMap<
-  Map<string, SystemAgentChatSession>,
-  KeyedAsyncQueue
->();
-
-function getSystemAgentSessionQueue(
-  sessions: Map<string, SystemAgentChatSession>,
-): KeyedAsyncQueue {
-  let queue = systemAgentSessionQueues.get(sessions);
-  if (!queue) {
-    queue = new KeyedAsyncQueue();
-    systemAgentSessionQueues.set(sessions, queue);
-  }
-  return queue;
-}
 
 async function runSystemAgentGatewayTask<T>(task: () => Promise<T>): Promise<T> {
   // Track every accepted RPC as active, never queued: restart draining snapshots
@@ -244,7 +230,7 @@ export const systemAgentHandlers: GatewayRequestHandlers = {
       undefined,
     );
   },
-  "openclaw.chat.history": ({ params, respond, client, context }) => {
+  "openclaw.chat.history": async ({ params, respond, client, context }) => {
     if (
       !assertValidParams(
         params,
@@ -255,15 +241,25 @@ export const systemAgentHandlers: GatewayRequestHandlers = {
     ) {
       return;
     }
-    const session = resolveSystemAgentHistorySession({
-      requestedSessionId: params.sessionId,
-      sessions: context.systemAgentSessions,
-      client,
-    });
-    respond(true, {
-      turns: readTranscriptTail(params.limit ?? DEFAULT_SYSTEM_AGENT_HISTORY_LIMIT),
-      ...(session ? { session } : {}),
-    });
+    const respondWithHistory = () => {
+      const session = resolveSystemAgentHistorySession({
+        requestedSessionId: params.sessionId,
+        sessions: context.systemAgentSessions,
+        client,
+      });
+      respond(true, {
+        turns: readTranscriptTail(params.limit ?? DEFAULT_SYSTEM_AGENT_HISTORY_LIMIT),
+        ...(session ? { session } : {}),
+      });
+    };
+    if (!params.sessionId) {
+      respondWithHistory();
+      return;
+    }
+    await getSystemAgentSessionQueue(context.systemAgentSessions).enqueue(
+      params.sessionId,
+      async () => respondWithHistory(),
+    );
   },
   /** Structured onboarding: list reusable AI access on this host. */
   "openclaw.setup.detect": async ({ params, respond }) => {

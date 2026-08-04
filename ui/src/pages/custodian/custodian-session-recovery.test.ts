@@ -114,6 +114,47 @@ describe("custodian session recovery", () => {
     });
   });
 
+  it("keeps a stored live session retryable when history is temporarily unavailable", async () => {
+    writeCustodianSessionPointer(
+      "ws://gateway.test/control",
+      "onboarding",
+      "retryable-reload-session",
+    );
+    const request = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("history request timed out"))
+      .mockResolvedValueOnce({
+        turns: [{ role: "assistant", text: "Enter the secret.", at: 1 }],
+        session: {
+          sessionId: "retryable-reload-session",
+          step: {
+            id: "secret",
+            type: "text",
+            message: "Twitch client secret",
+            sensitive: true,
+          },
+        },
+      });
+    const { context } = createContext(request, ["openclaw.chat", "openclaw.chat.history"]);
+    const { page } = await mountPage(context);
+
+    const retry = await waitForFast(() => {
+      const button = page.querySelector<HTMLButtonElement>('[role="alert"] button');
+      expect(button?.textContent).toContain("Retry");
+      return button!;
+    });
+    expect(request.mock.calls.filter(([method]) => method === "openclaw.chat")).toHaveLength(0);
+
+    retry.click();
+    await waitForFast(() =>
+      expect(page.querySelector<HTMLInputElement>(".custodian__wizard-step input")).not.toBeNull(),
+    );
+    expect(request.mock.calls).toEqual([
+      ["openclaw.chat.history", { sessionId: "retryable-reload-session" }, expect.any(Object)],
+      ["openclaw.chat.history", { sessionId: "retryable-reload-session" }, expect.any(Object)],
+    ]);
+  });
+
   it("cold-starts when the gateway no longer owns the stored live session", async () => {
     writeCustodianSessionPointer(
       "ws://gateway.test/control",

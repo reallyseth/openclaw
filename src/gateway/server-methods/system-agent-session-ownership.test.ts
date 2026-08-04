@@ -362,6 +362,56 @@ describe("openclaw.chat session responses", () => {
     expect((foreign.payload as { session?: unknown }).session).toBeUndefined();
   });
 
+  it("serializes a live wizard snapshot behind an in-flight answer", async () => {
+    const engine = makeEngine();
+    engine.getActiveWizardStep.mockReturnValue({
+      id: "channel",
+      type: "select",
+      message: "Choose a channel",
+      options: [{ value: "twitch", label: "Twitch" }],
+    });
+    let releaseAnswer: (() => void) | undefined;
+    const answerBlocked = new Promise<void>((resolve) => {
+      releaseAnswer = resolve;
+    });
+    engine.answerWizard.mockImplementation(async () => {
+      await answerBlocked;
+      engine.getActiveWizardStep.mockReturnValue({
+        id: "secret",
+        type: "text",
+        message: "Twitch secret",
+        sensitive: true,
+      });
+      return { text: "Enter the secret.", action: "none" };
+    });
+    const sessions = new Map<string, SystemAgentChatSession>([
+      ["s1", seededSession({ engine, ownerKey: "device:device-owner" })],
+    ]);
+    const context = makeContext(sessions);
+    const owner = makeClient({ connId: "owner", deviceId: "device-owner" });
+
+    const answer = callChat(
+      context,
+      { sessionId: "s1", wizardAnswer: { stepId: "channel", value: "twitch" } },
+      owner,
+    );
+    await vi.waitFor(() => expect(engine.answerWizard).toHaveBeenCalledOnce());
+    let historySettled = false;
+    const history = callHistory(context, { sessionId: "s1" }, owner).then((result) => {
+      historySettled = true;
+      return result;
+    });
+    await Promise.resolve();
+    expect(historySettled).toBe(false);
+
+    expectDefined(releaseAnswer, "answer release")();
+    await answer;
+    expect(await history).toMatchObject({
+      ok: true,
+      payload: { session: { sessionId: "s1", step: { id: "secret", sensitive: true } } },
+    });
+  });
+
   it("returns the stored welcome when no message is sent", async () => {
     const sessions = new Map<string, SystemAgentChatSession>([["s1", seededSession()]]);
     const call = await callChat(makeContext(sessions), { sessionId: "s1" });
