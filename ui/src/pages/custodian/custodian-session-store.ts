@@ -9,13 +9,16 @@ import { selectApplicationSession } from "../../app/agent-selection.ts";
 import type { ApplicationContext } from "../../app/context.ts";
 import { t } from "../../i18n/index.ts";
 import { isGatewayMethodAdvertised } from "../../lib/gateway-methods.ts";
-import { buildAgentMainSessionKey, normalizeAgentId } from "../../lib/sessions/session-key.ts";
+import { buildAgentMainSessionKey } from "../../lib/sessions/session-key.ts";
 import { pathForCustodianAgentHandoff } from "./custodian-navigation.ts";
 import { custodianWizardSubmission, initialCustodianWizardValue } from "./custodian-wizard-step.ts";
 import * as eventNudgeState from "./event-nudge.ts";
 import {
   custodianChatParams,
+  hasCustodianUserInput,
   isCustodianSessionInvalidatedError,
+  resolveConfiguredInferenceState,
+  type ConfiguredInferenceState,
   type CustodianSessionVariant,
 } from "./session-lifecycle.ts";
 import {
@@ -37,16 +40,6 @@ import {
 const SYSTEM_AGENT_CHAT_TIMEOUT_MS = 190_000;
 const SILENT_REPLY_PATTERN = /^\s*NO_REPLY\s*$/;
 
-function hasCustodianUserInput(params: SystemAgentChatParams): boolean {
-  return (
-    params.message !== undefined ||
-    params.wizardAnswer !== undefined ||
-    params.wizardCancel !== undefined
-  );
-}
-
-type StoreListener = () => void;
-type ConfiguredInferenceState = "unresolved" | "required" | "ready";
 type CustodianSetupIssue = "missing" | "unavailable";
 
 /** One process-local conversation owner shared by the full page and dock surface. */
@@ -88,9 +81,9 @@ export class CustodianSessionStore {
   private gatewayCleanup: (() => void) | null = null;
   private agentCleanup: (() => void) | null = null;
   private eventCleanup: (() => void) | null = null;
-  private readonly listeners = new Set<StoreListener>();
+  private readonly listeners = new Set<() => void>();
 
-  subscribe(listener: StoreListener): () => void {
+  subscribe(listener: () => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
@@ -435,7 +428,7 @@ export class CustodianSessionStore {
     const client = snapshot.phase === "connected" ? snapshot.client : null;
     const chatSupported =
       client !== null && isGatewayMethodAdvertised(snapshot, "openclaw.chat") === true;
-    const configuredInferenceState = this.resolveConfiguredInferenceState();
+    const configuredInferenceState = resolveConfiguredInferenceState(this.context);
     const inferenceStateChanged = configuredInferenceState !== this.configuredInferenceState;
     this.configuredInferenceState = configuredInferenceState;
     const variantChanged = this.sessionStarted && this.sessionVariant !== this.variant;
@@ -479,7 +472,7 @@ export class CustodianSessionStore {
       }
       this.chatAvailable = true;
       this.abandonPendingUserTurn(pendingParams);
-      this.rotateVolatileSession(client, this.currentSessionVariant());
+      this.rotateVolatileSession(client, this.variant);
       return;
     } else if (requestWasPending) {
       if (pendingParams?.message === undefined) {
@@ -514,32 +507,7 @@ export class CustodianSessionStore {
       return;
     }
     this.clearConversation();
-    this.startSession(client, this.currentSessionVariant(), true);
-  }
-
-  private resolveConfiguredInferenceState(): ConfiguredInferenceState {
-    const context = this.context;
-    if (!context || context.gateway.snapshot.phase !== "connected") {
-      return "unresolved";
-    }
-    const agentsList = context.agents.state.agentsList;
-    if (!agentsList) {
-      return "unresolved";
-    }
-    const selectedId = normalizeAgentId(
-      context.gateway.snapshot.assistantAgentId ?? agentsList.defaultId ?? "",
-    );
-    const selectedAgent = agentsList.agents.find(
-      (agent) => normalizeAgentId(agent.id) === selectedId,
-    );
-    if (!selectedAgent) {
-      return "unresolved";
-    }
-    return selectedAgent.model?.primary?.trim() ? "ready" : "required";
-  }
-
-  private currentSessionVariant(): CustodianSessionVariant {
-    return this.variant;
+    this.startSession(client, this.variant, true);
   }
 
   private async initializeSession(
@@ -563,7 +531,7 @@ export class CustodianSessionStore {
         }
         return;
       }
-      if (this.sessionRestorePending === false && params.sessionId !== this.sessionId) {
+      if (!this.sessionRestorePending && params.sessionId !== this.sessionId) {
         requestParams = { ...params, sessionId: this.sessionId };
         this.retryParams = requestParams;
       }
@@ -756,7 +724,7 @@ export class CustodianSessionStore {
             : null;
         if (hasCustodianUserInput(params) && isCustodianSessionInvalidatedError(error)) {
           // Retained transcript rows are display context only; the next turn needs a fresh id.
-          this.rotateVolatileSession(client, this.currentSessionVariant());
+          this.rotateVolatileSession(client, this.variant);
           this.error = t("custodian.sessionRestarted", { error: custodianErrorMessage(error) });
         }
       }
