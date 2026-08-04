@@ -347,10 +347,10 @@ describe("openclaw.chat session responses", () => {
       message: "Twitch secret",
       sensitive: true,
     });
-    const sessions = new Map<string, SystemAgentChatSession>([
-      ["s1", seededSession({ engine, ownerKey: "device:device-owner" })],
-    ]);
+    const session = seededSession({ engine, ownerKey: "device:device-owner" });
+    const sessions = new Map<string, SystemAgentChatSession>([["s1", session]]);
     const context = makeContext(sessions);
+    const now = vi.spyOn(Date, "now").mockReturnValue(100);
 
     const owner = await callHistory(
       context,
@@ -361,7 +361,9 @@ describe("openclaw.chat session responses", () => {
       ok: true,
       payload: { session: { sessionId: "s1", step: { id: "secret", sensitive: true } } },
     });
+    expect(session.lastUsedAt).toBe(100);
 
+    now.mockReturnValue(200);
     const foreign = await callHistory(
       context,
       { sessionId: "s1" },
@@ -369,6 +371,7 @@ describe("openclaw.chat session responses", () => {
     );
     expect(foreign).toMatchObject({ ok: true, payload: { turns: [] } });
     expect((foreign.payload as { session?: unknown }).session).toBeUndefined();
+    expect(session.lastUsedAt).toBe(100);
   });
 
   it("serializes a live wizard snapshot behind an in-flight answer", async () => {

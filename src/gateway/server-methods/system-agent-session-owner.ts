@@ -69,6 +69,7 @@ export function resolveSystemAgentHistorySession(params: {
   if (!liveSession || !ownerKey || liveSession.ownerKey !== ownerKey) {
     return undefined;
   }
+  liveSession.lastUsedAt = Date.now();
   const activeStep = liveSession.engine.getActiveWizardStep();
   return {
     sessionId: requestedSessionId,
