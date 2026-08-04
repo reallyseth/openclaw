@@ -2444,6 +2444,64 @@ struct GatewayNodeSessionTests {
     }
 
     @Test
+    func `node invoke receipt timeout dispatch preserves authoritative session envelopes`() async throws {
+        let session = FakeGatewayWebSocketSession()
+        let gateway = GatewayNodeSession()
+        let capture = SessionKeyEnvelopeCapture()
+        let options = nodeConnectOptions(
+            caps: ["computer"],
+            commands: ["computer.act"],
+            clientId: "openclaw-macos",
+            clientDisplayName: "macOS Test")
+
+        try await gateway.connectForTest(
+            testURL("ws://example.invalid"),
+            options: options,
+            session: session,
+            onInvoke: { request in
+                await capture.append(GatewayNodeInvokeContext.sessionKeyEnvelope)
+                return BridgeInvokeResponse(id: request.id, ok: true)
+            })
+        let task = try #require(session.latestTask())
+        try await waitUntil("protocol feature publication") {
+            task.sentRequestCount(method: "node.protocolFeatures.update") == 1 &&
+                task.hasPendingReceiveHandler()
+        }
+
+        task.emitInvokeRequest(
+            id: "computer-attributed",
+            command: "computer.act",
+            paramsJSON: #"{"action":"type","text":"one"}"#,
+            idempotencyKey: "computer.act:v1:attributed",
+            includeSessionKey: true,
+            sessionKey: "agent:main:main",
+            timeoutMs: 1_000)
+        try await waitUntil("attributed computer invoke completed") {
+            task.sentRequestCount(method: "node.invoke.result") == 1
+        }
+        try await waitUntil("receive loop ready for cleared computer invoke") {
+            task.hasPendingReceiveHandler()
+        }
+        task.emitInvokeRequest(
+            id: "computer-cleared",
+            command: "computer.act",
+            paramsJSON: #"{"action":"type","text":"two"}"#,
+            idempotencyKey: "computer.act:v1:cleared",
+            includeSessionKey: true,
+            sessionKey: nil,
+            timeoutMs: 1_000)
+        try await waitUntil("cleared computer invoke completed") {
+            task.sentRequestCount(method: "node.invoke.result") == 2
+        }
+
+        #expect(await capture.all() == [
+            .authoritative("agent:main:main"),
+            .authoritative(nil),
+        ])
+        await gateway.disconnect()
+    }
+
+    @Test
     func `node invoke negotiation resets legacy fallback after reconnect`() async throws {
         let legacySession = FakeGatewayWebSocketSession(protocolFeaturesError: [
             "code": "INVALID_REQUEST",
