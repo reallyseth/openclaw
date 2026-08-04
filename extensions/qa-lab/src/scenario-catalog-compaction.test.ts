@@ -98,6 +98,12 @@ describe("qa compaction scenario catalog", () => {
         },
       },
     ]);
+    const runtimeGuard = scenario.execution.flow?.steps[0]?.actions[1] as
+      | Record<string, unknown>
+      | undefined;
+    expect(runtimeGuard?.assert).toMatchObject({
+      expr: "(env.gateway.runtimeEnv.OPENCLAW_QA_FORCE_RUNTIME === undefined || env.gateway.runtimeEnv.OPENCLAW_QA_FORCE_RUNTIME === 'openclaw') && env.providerMode === 'mock-openai' && Boolean(env.mock)",
+    });
 
     const knownGapIndex = flow.indexOf(knownGap);
     const gatewayWorkIndex = flow.indexOf('"call":"waitForGatewayHealthy"');
