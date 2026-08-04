@@ -895,6 +895,7 @@ describe("worker turn launcher", () => {
       agentId: "main",
     });
     const onExecutionStarted = vi.fn();
+    const onExecutionAttributionChanged = vi.fn();
 
     await provider.executeTurn(
       {
@@ -908,12 +909,16 @@ describe("worker turn launcher", () => {
         attribution,
         lifecycleGeneration: "worker-generation",
         onExecutionStarted,
+        onExecutionAttributionChanged,
         suppressNextUserMessagePersistence: true,
       },
       async () => ({ meta: { durationMs: 1 } }),
     );
 
     expect(onExecutionStarted).toHaveBeenCalledWith({
+      lifecycleGeneration: "worker-generation",
+    });
+    expect(onExecutionAttributionChanged).toHaveBeenCalledWith({
       lifecycleGeneration: "worker-generation",
       attribution,
     });
