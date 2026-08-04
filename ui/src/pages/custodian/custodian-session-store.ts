@@ -21,6 +21,7 @@ import {
   type ConfiguredInferenceState,
   type CustodianSessionVariant,
 } from "./session-lifecycle.ts";
+import { CustodianSessionOwnershipTracker } from "./session-ownership.ts";
 import {
   clearCustodianSessionPointer,
   readCustodianSessionPointer,
@@ -75,7 +76,7 @@ export class CustodianSessionStore {
   private sessionOwnershipKey: string | null = null;
   private sessionStarted = false;
   private sessionRestorePending = false;
-  private lastHelloDeviceToken = "";
+  private readonly sessionOwnership = new CustodianSessionOwnershipTracker();
   private configuredInferenceState: ConfiguredInferenceState = "unresolved";
   private eventNudgeClosed = false;
   private gatewayCleanup: (() => void) | null = null;
@@ -354,19 +355,6 @@ export class CustodianSessionStore {
     }
   }
 
-  private currentSessionOwnershipKey(): string {
-    const context = this.context;
-    if (!context) {
-      return "";
-    }
-    const { gatewayUrl, token, password, bootstrapToken } = context.gateway.connection;
-    const auth = context.gateway.snapshot.hello?.auth;
-    if (auth) {
-      this.lastHelloDeviceToken = auth.deviceToken ?? "";
-    }
-    return JSON.stringify([gatewayUrl, token, password, bootstrapToken, this.lastHelloDeviceToken]);
-  }
-
   private startSession(
     client: GatewayBrowserClient,
     variant: CustodianSessionVariant,
@@ -382,7 +370,7 @@ export class CustodianSessionStore {
     this.sessionRestorePending = storedSessionId !== null;
     this.sessionVariant = variant;
     this.sessionClient = client;
-    this.sessionOwnershipKey = this.currentSessionOwnershipKey();
+    this.sessionOwnershipKey = this.sessionOwnership.current(this.context);
     this.sessionStarted = true;
     void this.initializeSession(
       client,
@@ -430,7 +418,7 @@ export class CustodianSessionStore {
     const inferenceStateChanged = configuredInferenceState !== this.configuredInferenceState;
     this.configuredInferenceState = configuredInferenceState;
     const variantChanged = this.sessionStarted && this.sessionVariant !== this.variant;
-    const ownershipKey = this.currentSessionOwnershipKey();
+    const ownershipKey = this.sessionOwnership.current(this.context);
     const clientReplaced =
       this.sessionStarted &&
       client !== null &&
@@ -466,6 +454,18 @@ export class CustodianSessionStore {
         this.sessionStarted = false;
         this.abandonPendingUserTurn(pendingParams);
         this.error = t("custodian.unsupportedGateway");
+        return;
+      }
+      if (
+        this.sessionRestorePending &&
+        !requestWasPending &&
+        this.canRetry() &&
+        !this.abandonedTurnOutcomeUnknown
+      ) {
+        // A same-owner reconnect retries the authoritative live session read.
+        this.chatAvailable = true;
+        this.sessionClient = client;
+        this.retry();
         return;
       }
       this.chatAvailable = true;

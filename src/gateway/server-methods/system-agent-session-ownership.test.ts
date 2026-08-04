@@ -1,7 +1,7 @@
 // System-agent session tests cover caller ownership and response projection.
 
 import { expectDefined } from "@openclaw/normalization-core";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import { resetCommandQueueStateForTest } from "../../process/command-queue.test-support.js";
 import {
   SystemAgentWizardAnswerError,
@@ -42,18 +42,20 @@ vi.mock("../../system-agent/greeting.js", () => ({
   resolveSystemAgentGreeting: vi.fn(async () => ({ text: "welcome text", source: "template" })),
 }));
 
+type AsyncMock = Mock<(...args: unknown[]) => Promise<unknown>>;
+
 type FakeEngine = {
-  answerWizard: ReturnType<typeof vi.fn>;
-  cancelWizard: ReturnType<typeof vi.fn>;
-  handle: ReturnType<typeof vi.fn>;
+  answerWizard: AsyncMock;
+  cancelWizard: AsyncMock;
+  handle: AsyncMock;
   seedHistory: ReturnType<typeof vi.fn>;
   historyLength: ReturnType<typeof vi.fn>;
   historySince: ReturnType<typeof vi.fn>;
   getActiveWizardStep: ReturnType<typeof vi.fn>;
   getPendingOperatorProposal: ReturnType<typeof vi.fn>;
-  resolveOperatorApproval: ReturnType<typeof vi.fn>;
-  dispose: ReturnType<typeof vi.fn>;
-  loadOverview: ReturnType<typeof vi.fn>;
+  resolveOperatorApproval: AsyncMock;
+  dispose: AsyncMock;
+  loadOverview: AsyncMock;
   noteAssistantMessage: ReturnType<typeof vi.fn>;
 };
 
@@ -407,6 +409,65 @@ describe("openclaw.chat session responses", () => {
     expectDefined(releaseAnswer, "answer release")();
     await answer;
     expect(await history).toMatchObject({
+      ok: true,
+      payload: { session: { sessionId: "s1", step: { id: "secret", sensitive: true } } },
+    });
+  });
+
+  it("reserves session ordering before an answer waits for the gateway queue", async () => {
+    const blockingEngine = makeEngine();
+    let releaseBlocker: (() => void) | undefined;
+    const blockerReleased = new Promise<void>((resolve) => {
+      releaseBlocker = resolve;
+    });
+    blockingEngine.handle.mockImplementation(async () => {
+      await blockerReleased;
+      return { text: "unblocked", action: "none" };
+    });
+
+    const engine = makeEngine();
+    engine.getActiveWizardStep.mockReturnValue({
+      id: "channel",
+      type: "select",
+      message: "Choose a channel",
+      options: [{ value: "twitch", label: "Twitch" }],
+    });
+    engine.answerWizard.mockImplementation(async () => {
+      engine.getActiveWizardStep.mockReturnValue({
+        id: "secret",
+        type: "text",
+        message: "Twitch secret",
+        sensitive: true,
+      });
+      return { text: "Enter the secret.", action: "none" };
+    });
+    const sessions = new Map<string, SystemAgentChatSession>([
+      ["blocking", seededSession({ engine: blockingEngine })],
+      ["s1", seededSession({ engine })],
+    ]);
+    const context = makeContext(sessions);
+
+    const blocker = callChat(context, { sessionId: "blocking", message: "hold" });
+    await vi.waitFor(() => expect(blockingEngine.handle).toHaveBeenCalledOnce());
+    const answer = callChat(context, {
+      sessionId: "s1",
+      wizardAnswer: { stepId: "channel", value: "twitch" },
+    });
+    const history = callHistory(context, { sessionId: "s1" });
+    const admissionOrder = await Promise.race([
+      history.then(() => "history" as const),
+      new Promise<"blocked">((resolve) => {
+        setTimeout(() => resolve("blocked"), 10);
+      }),
+    ]);
+
+    expectDefined(releaseBlocker, "gateway blocker release")();
+    await blocker;
+    await answer;
+    const recovered = await history;
+
+    expect(admissionOrder).toBe("blocked");
+    expect(recovered).toMatchObject({
       ok: true,
       payload: { session: { sessionId: "s1", step: { id: "secret", sensitive: true } } },
     });

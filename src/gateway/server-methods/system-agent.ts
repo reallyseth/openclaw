@@ -490,13 +490,12 @@ export const systemAgentHandlers: GatewayRequestHandlers = {
       respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, inputError));
       return;
     }
-    await runSystemAgentGatewayTask(async () => {
-      const sessions = context.systemAgentSessions;
-      const sessionId = params.sessionId;
-      // Initialization, resets, and turns share one per-session queue. Without
-      // it, concurrent first messages can create competing engines and lose
-      // conversation state when the later initializer replaces the first.
-      await getSystemAgentSessionQueue(sessions).enqueue(sessionId, async () => {
+    const sessions = context.systemAgentSessions;
+    const sessionId = params.sessionId;
+    // Claim session order as soon as the RPC is admitted. History snapshots use
+    // this same queue and must not overtake a turn waiting for the global lane.
+    await getSystemAgentSessionQueue(sessions).enqueue(sessionId, async () => {
+      await runSystemAgentGatewayTask(async () => {
         const ownerKey = resolveSystemAgentSessionOwnerKey({
           delegation: params.delegation,
           client,

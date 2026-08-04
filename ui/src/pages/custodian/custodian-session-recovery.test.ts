@@ -1,6 +1,7 @@
 /* @vitest-environment jsdom */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import { waitForFast } from "../../test-helpers/wait-for.ts";
 import { createContext, mountPage } from "./custodian-page.test-harness.ts";
 import { writeCustodianSessionPointer } from "./session-pointer.ts";
@@ -153,6 +154,49 @@ describe("custodian session recovery", () => {
       ["openclaw.chat.history", { sessionId: "retryable-reload-session" }, expect.any(Object)],
       ["openclaw.chat.history", { sessionId: "retryable-reload-session" }, expect.any(Object)],
     ]);
+  });
+
+  it("retries a pending restore after the same owner reconnects", async () => {
+    writeCustodianSessionPointer(
+      "ws://gateway.test/control",
+      "onboarding",
+      "reconnect-reload-session",
+    );
+    const initialRequest = vi.fn().mockRejectedValue(new Error("history request timed out"));
+    const { context, setGatewaySnapshot } = createContext(initialRequest, [
+      "openclaw.chat",
+      "openclaw.chat.history",
+    ]);
+    const { page } = await mountPage(context);
+    await waitForFast(() =>
+      expect(page.querySelector<HTMLButtonElement>('[role="alert"] button')).not.toBeNull(),
+    );
+
+    const replacementRequest = vi.fn().mockResolvedValue({
+      turns: [{ role: "assistant", text: "Enter the secret.", at: 1 }],
+      session: {
+        sessionId: "reconnect-reload-session",
+        step: {
+          id: "secret",
+          type: "text",
+          message: "Twitch client secret",
+          sensitive: true,
+        },
+      },
+    });
+    setGatewaySnapshot({
+      client: { request: replacementRequest } as unknown as GatewayBrowserClient,
+    });
+
+    await waitForFast(() =>
+      expect(page.querySelector<HTMLInputElement>(".custodian__wizard-step input")).not.toBeNull(),
+    );
+    expect(replacementRequest.mock.calls).toEqual([
+      ["openclaw.chat.history", { sessionId: "reconnect-reload-session" }, expect.any(Object)],
+    ]);
+    expect(
+      replacementRequest.mock.calls.filter(([method]) => method === "openclaw.chat"),
+    ).toHaveLength(0);
   });
 
   it("cold-starts when the gateway no longer owns the stored live session", async () => {
