@@ -136,11 +136,11 @@ async function evictOldestSession(
   }
   if (oldestKey !== undefined) {
     const oldest = sessions.get(oldestKey);
+    sessions.delete(oldestKey);
     if (oldest?.pendingApproval) {
       context.systemAgentApprovalManager?.expire(oldest.pendingApproval.id, "session-evicted");
     }
     await oldest?.engine.dispose();
-    sessions.delete(oldestKey);
   }
 }
 

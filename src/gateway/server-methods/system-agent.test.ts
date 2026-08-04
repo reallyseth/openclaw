@@ -1037,6 +1037,14 @@ describe("openclaw.chat", () => {
     const second = callChat(context, { sessionId: "new-2" });
     await evictionStarted.promise;
     await waitOneTask();
+    const { calls: historyCalls, respond: respondToHistory } = makeRespond();
+    await systemAgentHandler("openclaw.chat.history")({
+      params: { sessionId: "oldest" },
+      client: defaultClient,
+      context,
+      respond: respondToHistory,
+    } as never);
+    expect(historyCalls[0]).toEqual({ ok: true, payload: { turns: [] }, error: undefined });
     releaseEviction.resolve();
     await Promise.all([first, second]);
 
