@@ -19,7 +19,7 @@ import {
   openOpenClawStateDatabase,
 } from "../state/openclaw-state-db.js";
 import { createAgentEventAuditRecorder } from "./agent-event-audit.js";
-import { listAuditEvents } from "./audit-event-store.js";
+import { listAuditEvents, recordAuditEvent } from "./audit-event-store.js";
 import type { AuditEventInput } from "./audit-event-types.js";
 import type { AuditEventWriter } from "./audit-event-writer.js";
 
@@ -198,6 +198,66 @@ describe("agent audit lifecycle generations", () => {
         `lifecycle:${secondGeneration}:${runId}:1:${occurredAt}:agent.run.started`,
       ]),
     );
+  });
+
+  it("upgrades a shipped legacy row before separating later generations", async () => {
+    const database = createDatabaseOptions();
+    const runId = "run-shipped-legacy-replay";
+    const occurredAt = 1_786_000_000_000;
+    const legacySourceId = `${runId}:1:${occurredAt}:agent.run.started`;
+    recordAuditEvent(
+      {
+        sourceId: legacySourceId,
+        sourceSequence: 1,
+        occurredAt,
+        kind: "agent_run",
+        action: "agent.run.started",
+        status: "started",
+        actorType: "agent",
+        actorId: "legacy",
+        agentId: "legacy",
+        runId,
+      },
+      database,
+    );
+    const recorder = createAgentEventAuditRecorder({
+      stateDir: database.env.OPENCLAW_STATE_DIR,
+      terminalSettleMs: 0,
+    });
+    const firstGeneration = getAgentEventLifecycleGeneration();
+    recorder.record(
+      agentEvent({
+        runId,
+        seq: 1,
+        ts: occurredAt,
+        data: { phase: "start", startedAt: occurredAt },
+        lifecycleGeneration: firstGeneration,
+        agentId: "first",
+      }),
+    );
+    const secondGeneration = rotateAgentEventLifecycleGeneration();
+    recorder.record(
+      agentEvent({
+        runId,
+        seq: 1,
+        ts: occurredAt,
+        data: { phase: "start", startedAt: occurredAt },
+        lifecycleGeneration: secondGeneration,
+        agentId: "second",
+      }),
+    );
+    await recorder.stop();
+
+    const { db } = openOpenClawStateDatabase(database);
+    expect(
+      db
+        .prepare("SELECT source_id FROM audit_events WHERE run_id = ? ORDER BY sequence")
+        .all(runId)
+        .map((row) => (row as { source_id: string }).source_id),
+    ).toEqual([
+      `lifecycle:${firstGeneration}:${legacySourceId}`,
+      `lifecycle:${secondGeneration}:${legacySourceId}`,
+    ]);
   });
 
   it("does not let a late old-generation terminal reactivate provenance", async () => {

@@ -574,6 +574,38 @@ function pruneAuditEventsAfterInsert(
   auditEventRowCounts.set(db, rowCount);
 }
 
+function adoptLegacyAuditSourceId(db: DatabaseSync, input: AuditEventInput): boolean {
+  if (input.kind === "message") {
+    return false;
+  }
+  const legacySourceId = input.legacySourceId;
+  if (!legacySourceId || legacySourceId === input.sourceId) {
+    return false;
+  }
+  const kysely = getAuditKysely(db);
+  const canonicalExists = executeSqliteQueryTakeFirstSync(
+    db,
+    kysely
+      .selectFrom("audit_events")
+      .select("sequence")
+      .where("source_id", "=", input.sourceId)
+      .limit(1),
+  );
+  if (canonicalExists) {
+    return true;
+  }
+  // The first generation-aware replay adopts the shipped key in place.
+  // Later generations see no legacy key and retain their distinct identities.
+  const adopted = executeSqliteQuerySync(
+    db,
+    kysely
+      .updateTable("audit_events")
+      .set({ source_id: input.sourceId })
+      .where("source_id", "=", legacySourceId),
+  );
+  return Number(adopted.numAffectedRows ?? 0n) > 0;
+}
+
 /** Persist one projected event idempotently and prune fixed retention bounds. */
 export function recordAuditEvent(
   input: AuditEventInput,
@@ -583,6 +615,9 @@ export function recordAuditEvent(
   try {
     return runOpenClawStateWriteTransaction(({ db }) => {
       countCacheDatabase = db;
+      if (adoptLegacyAuditSourceId(db, input)) {
+        return undefined;
+      }
       const insert = executeSqliteQuerySync(
         db,
         getAuditKysely(db)
