@@ -1166,6 +1166,41 @@ final class NodeAppModel {
         }
     }
 
+    // MARK: - Siri query connection hold
+
+    /// While >0, background grace expiry will not disconnect the gateway or
+    /// dismiss the Live Activity — Siri queries in flight need both to survive.
+    private var siriQueryHoldCount = 0
+    private var siriQueryHoldTaskID: UIBackgroundTaskIdentifier = .invalid
+
+    func beginSiriQueryHold() {
+        self.siriQueryHoldCount += 1
+        self.pushWakeLogger.info("siri query hold count=\(self.siriQueryHoldCount, privacy: .public)")
+        guard self.siriQueryHoldTaskID == .invalid else { return }
+        self.siriQueryHoldTaskID = UIApplication.shared
+            .beginBackgroundTask(withName: "siri-query-hold") { [weak self] in
+                Task { @MainActor in
+                    guard let self, self.siriQueryHoldTaskID != .invalid else { return }
+                    self.pushWakeLogger.info("siri query hold expired (OS assertion)")
+                    self.endSiriQueryHoldTask()
+                }
+            }
+    }
+
+    func endSiriQueryHold() {
+        self.siriQueryHoldCount = max(0, self.siriQueryHoldCount - 1)
+        self.pushWakeLogger.info("siri query hold count=\(self.siriQueryHoldCount, privacy: .public)")
+        if self.siriQueryHoldCount == 0 {
+            self.endSiriQueryHoldTask()
+        }
+    }
+
+    private func endSiriQueryHoldTask() {
+        guard self.siriQueryHoldTaskID != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(self.siriQueryHoldTaskID)
+        self.siriQueryHoldTaskID = .invalid
+    }
+
     private func beginBackgroundConnectionGracePeriod(seconds: TimeInterval = 25) {
         self.grantBackgroundReconnectLease(seconds: seconds, reason: "scene_background_grace")
         self.endBackgroundConnectionGracePeriod(reason: "restart")
@@ -1226,6 +1261,10 @@ final class NodeAppModel {
 
     private func suppressBackgroundReconnect(reason: String, disconnectIfNeeded: Bool) {
         guard self.isBackgrounded else { return }
+        guard self.siriQueryHoldCount == 0 else {
+            self.pushWakeLogger.info("siri query in flight; keeping gateway (reason=\(reason, privacy: .public))")
+            return
+        }
         let hadLease = self.backgroundReconnectLeaseUntil != nil
         let changed = hadLease || !self.backgroundReconnectSuppressed
         self.backgroundReconnectLeaseUntil = nil

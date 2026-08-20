@@ -41,6 +41,10 @@ struct AskOpenClawIntent: AppIntent {
             return .result(dialog: "OpenClaw isn't connected to a gateway. Please open the app and connect.")
         }
 
+        // Hold gateway + Live Activity alive across backgrounding for this query.
+        appModel.beginSiriQueryHold()
+        defer { appModel.endSiriQueryHold() }
+
         let sessionKey = appModel.chatSessionKey
         let agentID = appModel.chatDeliveryAgentId
         let agentName = appModel.chatAgentName
@@ -125,6 +129,7 @@ struct AskOpenClawIntent: AppIntent {
             case .checkAgain, .unavailable:
                 // 5b. Slow path — start detached long-poll, then return
                 Self.startDetachedLongPoll(
+                    appModel: appModel,
                     transport: transport,
                     runId: sendResponse.runId,
                     queryID: queryID,
@@ -176,6 +181,7 @@ struct AskOpenClawIntent: AppIntent {
     /// Starts a detached task that continues long-polling for up to 120 seconds.
     /// When the run completes, it updates the Live Activity and SiriQueryStore.
     private nonisolated static func startDetachedLongPoll(
+        appModel: NodeAppModel,
         transport: any OpenClawChatTransport,
         runId: String,
         queryID: UUID,
@@ -184,6 +190,11 @@ struct AskOpenClawIntent: AppIntent {
         agentName: String)
     {
         Task.detached {
+            // The slow path outlives perform(); hold the gateway + island for
+            // as long as this poll runs (release happens on every branch).
+            await MainActor.run { appModel.beginSiriQueryHold() }
+            defer { Task { @MainActor in appModel.endSiriQueryHold() } }
+
             // Long-poll in bounded chunks (120s + 180s ≈ the Live Activity
             // stale window) so slow runs keep the island alive instead of
             // silently dismissing it at a single 120s timeout.
@@ -196,35 +207,38 @@ struct AskOpenClawIntent: AppIntent {
                     timeoutMs: 180_000)
             }
 
-            await MainActor.run {
-                switch observation {
-                case .terminal(.completed):
-                    Task {
-                        let preview = await fetchLastAssistantText(
-                            transport: transport,
-                            sessionKey: sessionKey)
-                            ?? "Done!"
-                        let truncated = String(preview.prefix(200))
+            switch observation {
+            case .terminal(.completed):
+                // Fetch history inline so the hold covers the gateway call,
+                // then update UI on the main actor.
+                let preview = await fetchLastAssistantText(
+                    transport: transport,
+                    sessionKey: sessionKey)
+                    ?? "Done!"
+                let truncated = String(preview.prefix(200))
+                await MainActor.run {
+                    SiriLiveActivityBridge.shared.showResult(
+                        responsePreview: truncated,
+                        agentName: agentName,
+                        sessionKey: sessionKey)
 
-                        SiriLiveActivityBridge.shared.showResult(
-                            responsePreview: truncated,
-                            agentName: agentName,
-                            sessionKey: sessionKey)
-
-                        SiriQueryStore.complete(SiriQueryStore.CompletedQuery(
-                            id: queryID,
-                            message: message,
-                            responsePreview: truncated,
-                            fullResponse: preview,
-                            sessionKey: sessionKey,
-                            completedAt: .now))
-                    }
-                case .terminal(.failed):
+                    SiriQueryStore.complete(SiriQueryStore.CompletedQuery(
+                        id: queryID,
+                        message: message,
+                        responsePreview: truncated,
+                        fullResponse: preview,
+                        sessionKey: sessionKey,
+                        completedAt: .now))
+                }
+            case .terminal(.failed):
+                await MainActor.run {
                     SiriLiveActivityBridge.shared.end()
                     SiriQueryStore.clearPending()
-                case .checkAgain, .unavailable:
-                    // Still running (or unavailable) after the poll budget:
-                    // keep the island honest rather than silently ending it.
+                }
+            case .checkAgain, .unavailable:
+                // Still running (or unavailable) after the poll budget:
+                // keep the island honest rather than silently ending it.
+                await MainActor.run {
                     SiriLiveActivityBridge.shared.showQuerying(
                         message: "Still working — open the app",
                         agentName: agentName,
