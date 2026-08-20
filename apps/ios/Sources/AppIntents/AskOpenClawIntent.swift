@@ -27,6 +27,16 @@ struct AskOpenClawIntent: AppIntent {
             return .result(dialog: "OpenClaw isn't running. Please open the app first.")
         }
 
+        // A Siri invocation may cold-launch the app in the background; the
+        // operator gateway reconnect loop needs a moment to re-establish the
+        // session. Wait briefly before declaring the gateway unreachable.
+        if !appModel.isOperatorGatewayConnected {
+            Self.logger.info("Siri intent: gateway not connected, waiting for reconnect")
+            let deadline = Date.now.addingTimeInterval(6)
+            while Date.now < deadline, !appModel.isOperatorGatewayConnected {
+                try? await Task.sleep(for: .milliseconds(300))
+            }
+        }
         guard appModel.isOperatorGatewayConnected else {
             return .result(dialog: "OpenClaw isn't connected to a gateway. Please open the app and connect.")
         }
