@@ -41,7 +41,7 @@ final class SiriLiveActivityBridge {
 
         // Auto-dismiss after 10 seconds so the Live Activity doesn't linger
         self.dismissTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(10))
+            try? await Task.sleep(for: .seconds(30))
             guard !Task.isCancelled else { return }
             self?.end()
         }

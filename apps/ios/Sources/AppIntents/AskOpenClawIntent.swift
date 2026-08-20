@@ -184,9 +184,17 @@ struct AskOpenClawIntent: AppIntent {
         agentName: String)
     {
         Task.detached {
-            let observation = await transport.waitForRunCompletion(
+            // Long-poll in bounded chunks (120s + 180s ≈ the Live Activity
+            // stale window) so slow runs keep the island alive instead of
+            // silently dismissing it at a single 120s timeout.
+            var observation = await transport.waitForRunCompletion(
                 runId: runId,
                 timeoutMs: 120_000)
+            if case .checkAgain = observation {
+                observation = await transport.waitForRunCompletion(
+                    runId: runId,
+                    timeoutMs: 180_000)
+            }
 
             await MainActor.run {
                 switch observation {
@@ -211,8 +219,16 @@ struct AskOpenClawIntent: AppIntent {
                             sessionKey: sessionKey,
                             completedAt: .now))
                     }
-                case .terminal(.failed), .checkAgain, .unavailable:
+                case .terminal(.failed):
                     SiriLiveActivityBridge.shared.end()
+                    SiriQueryStore.clearPending()
+                case .checkAgain, .unavailable:
+                    // Still running (or unavailable) after the poll budget:
+                    // keep the island honest rather than silently ending it.
+                    SiriLiveActivityBridge.shared.showQuerying(
+                        message: "Still working — open the app",
+                        agentName: agentName,
+                        sessionKey: sessionKey)
                     SiriQueryStore.clearPending()
                 }
             }

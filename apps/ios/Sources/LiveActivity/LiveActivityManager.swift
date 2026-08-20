@@ -234,7 +234,7 @@ final class LiveActivityManager {
         sessionKey: String)
     {
         let truncated = String(preview.prefix(150))
-        let detail = truncated.isEmpty ? nil : truncated
+        let detail = truncated.isEmpty ? nil : "Response ready — \(truncated)"
         let state = OpenClawActivityAttributes.ContentState(
             status: .siriResult,
             verbatimDetail: detail,
