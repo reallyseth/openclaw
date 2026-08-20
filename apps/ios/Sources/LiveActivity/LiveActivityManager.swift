@@ -239,6 +239,7 @@ final class LiveActivityManager {
             status: .siriResult,
             verbatimDetail: detail,
             startedAt: .now)
+        self.logger.info("siri result state -> arbiter (activity=\(self.currentActivity != nil, privacy: .public))")
         self.arbiter.setAttention(self.request(
             state: state,
             staleAfter: self.transientStaleSeconds,
@@ -283,6 +284,11 @@ final class LiveActivityManager {
     }
 
     private func reconcile(reason: String) {
+        if reason.hasPrefix("siri") {
+            self.logger
+                .info(
+                    "reconcile reason=\(reason, privacy: .public) hasRequest=\(self.arbiter.current != nil, privacy: .public) activityActive=\(self.currentActivity?.activityState.rawValue ?? 99, privacy: .public)")
+        }
         guard let request = arbiter.current else {
             self.endCurrentActivity(reason: reason)
             return
