@@ -79,6 +79,9 @@ const mocks = vi.hoisted(() => ({
     config: {},
   })),
   handleReset: vi.fn(async () => {}),
+  withSetupMigrationTargetLock: vi.fn(
+    async (_stateDir: string, run: () => Promise<unknown>) => await run(),
+  ),
 }));
 
 vi.mock("./onboard-interactive.js", () => ({
@@ -104,6 +107,10 @@ vi.mock("../config/config.js", () => ({
 
 vi.mock("../plugins/provider-auth-choice.runtime.js", () => ({
   resolvePluginProviders: mocks.resolvePluginProviders,
+}));
+
+vi.mock("../wizard/setup.migration-snapshot.js", () => ({
+  withSetupMigrationTargetLock: mocks.withSetupMigrationTargetLock,
 }));
 
 vi.mock("./onboard-helpers.js", async (importOriginal) => ({
@@ -184,6 +191,34 @@ describe("setupWizardCommand", () => {
     mocks.readConfigFileSnapshot.mockResolvedValue({ exists: false, valid: false, config: {} });
   });
 
+  it.each(["main", "robby", "Robby!"])("accepts valid first-agent name %s", async (agentName) => {
+    const runtime = makeRuntime();
+
+    await setupWizardCommand({ nonInteractive: true, acceptRisk: true, agentName }, runtime);
+
+    expect(mocks.runNonInteractiveSetup).toHaveBeenCalledWith(
+      expect.objectContaining({ agentName }),
+      runtime,
+    );
+  });
+
+  it.each(["!!!", "openclaw", "crestodian"])(
+    "rejects invalid or reserved first-agent name %s before setup",
+    async (agentName) => {
+      const runtime = makeRuntime();
+
+      await setupWizardCommand(
+        { nonInteractive: true, acceptRisk: true, reset: true, agentName },
+        runtime,
+      );
+
+      expect(runtime.error).toHaveBeenCalledWith(expect.stringContaining("Invalid --agent-name"));
+      expect(runtime.exit).toHaveBeenCalledWith(1);
+      expect(mocks.handleReset).not.toHaveBeenCalled();
+      expect(mocks.runNonInteractiveSetup).not.toHaveBeenCalled();
+    },
+  );
+
   it("fails fast for invalid secret-input-mode before setup starts", async () => {
     const runtime = makeRuntime();
 
@@ -262,13 +297,16 @@ describe("setupWizardCommand", () => {
 
     await setupWizardCommand({ reset: true, nonInteractive: true, acceptRisk: true }, runtime);
 
+    expect(mocks.withSetupMigrationTargetLock).toHaveBeenCalledOnce();
     expect(mocks.handleReset).toHaveBeenCalledOnce();
     expect(mocks.runNonInteractiveSetup).toHaveBeenCalledOnce();
+    const lockOrder = mocks.withSetupMigrationTargetLock.mock.invocationCallOrder[0];
     const resetOrder = mocks.handleReset.mock.invocationCallOrder[0];
     const setupOrder = mocks.runNonInteractiveSetup.mock.invocationCallOrder[0];
-    if (resetOrder === undefined || setupOrder === undefined) {
-      throw new Error("expected reset and non-interactive setup calls");
+    if (lockOrder === undefined || resetOrder === undefined || setupOrder === undefined) {
+      throw new Error("expected lock, reset, and non-interactive setup calls");
     }
+    expect(lockOrder).toBeLessThan(resetOrder);
     expect(resetOrder).toBeLessThan(setupOrder);
   });
 
@@ -555,6 +593,11 @@ describe("setupWizardCommand", () => {
       expectedError: "--remote-token requires --mode remote in non-interactive setup.",
     },
     {
+      label: "remote password in default local mode",
+      options: { remotePassword: "fixture-password" },
+      expectedError: "--remote-password requires --mode remote in non-interactive setup.",
+    },
+    {
       label: "unsupported daemon runtime while daemon install is skipped",
       options: { daemonRuntime: "bogus" as never, installDaemon: false },
       expectedError: "Invalid --daemon-runtime",
@@ -580,6 +623,50 @@ describe("setupWizardCommand", () => {
       expect(mocks.runGuidedOnboarding).not.toHaveBeenCalled();
     },
   );
+
+  it.each([
+    {
+      name: "simultaneous remote token and password credentials",
+      options: { remoteToken: "fixture-token", remotePassword: "fixture-password" },
+      message: "Use either --remote-token or --remote-password, not both.",
+    },
+    {
+      name: "an empty remote token",
+      options: { remoteToken: " " },
+      message: "Invalid --remote-token: value cannot be empty.",
+    },
+    {
+      name: "an empty remote password",
+      options: { remotePassword: " " },
+      message: "Invalid --remote-password: value cannot be empty.",
+    },
+    {
+      name: "a local gateway password in remote mode",
+      options: { gatewayPassword: "fixture-password" },
+      message:
+        "--gateway-password configures local gateway auth. Use --remote-password in remote mode.",
+    },
+  ])("rejects $name before resetting existing state", async ({ options, message }) => {
+    const runtime = makeRuntime();
+
+    await setupWizardCommand(
+      {
+        reset: true,
+        nonInteractive: true,
+        acceptRisk: true,
+        mode: "remote",
+        remoteUrl: "wss://gateway.example.invalid",
+        ...options,
+      },
+      runtime,
+    );
+
+    expect(runtime.error).toHaveBeenCalledWith(message);
+    expect(runtime.exit).toHaveBeenCalledWith(1);
+    expect(mocks.readConfigFileSnapshot).not.toHaveBeenCalled();
+    expect(mocks.handleReset).not.toHaveBeenCalled();
+    expect(mocks.runNonInteractiveSetup).not.toHaveBeenCalled();
+  });
 
   it("validates dependent gateway options before reset", async () => {
     const runtime = makeRuntime();
@@ -910,7 +997,6 @@ describe("setupWizardCommand", () => {
         skipSkills: false,
         acceptRisk: false,
         json: false,
-        tailscaleResetOnExit: undefined,
         customImageInput: undefined,
       },
       runtime,
@@ -922,8 +1008,10 @@ describe("setupWizardCommand", () => {
   });
 
   it.each([
+    ["--agent-name", { agentName: "robby" }],
     ["--tui", { tui: true }],
     ["--skip-ui", { skipUi: true }],
+    ["--suppress-gateway-token-output", { suppressGatewayTokenOutput: true }],
   ])("keeps %s on guided onboarding", async (_label, opts) => {
     const runtime = makeRuntime();
 
@@ -943,7 +1031,6 @@ describe("setupWizardCommand", () => {
     ["--remote-url", { remoteUrl: "wss://gw.example.ts.net" }],
     ["--skip-bootstrap", { skipBootstrap: true }],
     ["--no-install-daemon", { installDaemon: false }],
-    ["--no-tailscale-reset-on-exit", { tailscaleResetOnExit: false }],
     ["--custom-text-input", { customImageInput: false }],
     ["--daemon-runtime", { daemonRuntime: "node" as const }],
     ["a provider auth flag", { mistralApiKey: "sk-x" }],

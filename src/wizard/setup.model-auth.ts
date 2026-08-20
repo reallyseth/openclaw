@@ -49,9 +49,11 @@ async function resolveAuthChoiceModelSelectionPolicy(params: {
     env: params.env,
   });
 
-  const [{ resolveManifestProviderAuthChoice }, { resolvePluginSetupProvider }] = await Promise.all(
-    [import("../plugins/provider-auth-choices.js"), import("../plugins/setup-registry.js")],
-  );
+  const [{ resolveManifestProviderAuthChoice }, { resolvePluginSetupProviderCore }] =
+    await Promise.all([
+      import("../plugins/provider-auth-choices.js"),
+      import("../plugins/setup-registry.js"),
+    ]);
   const manifestChoice = resolveManifestProviderAuthChoice(params.authChoice, {
     config: params.config,
     workspaceDir: params.workspaceDir,
@@ -59,7 +61,7 @@ async function resolveAuthChoiceModelSelectionPolicy(params: {
     includeUntrustedWorkspacePlugins: false,
   });
   if (manifestChoice) {
-    const setupProvider = resolvePluginSetupProvider({
+    const setupProvider = resolvePluginSetupProviderCore({
       provider: manifestChoice.providerId,
       config: params.config,
       workspaceDir: params.workspaceDir,
@@ -124,6 +126,7 @@ export async function runSetupModelAuthStep(params: {
   runtime: RuntimeEnv;
   agentDir?: string;
   stateDir?: string;
+  preserveExistingModelSelection?: boolean;
 }): Promise<SetupModelAuthCandidate> {
   const { opts, prompter, runtime } = params;
   const env = params.stateDir ? { ...process.env, OPENCLAW_STATE_DIR: params.stateDir } : undefined;
@@ -200,6 +203,7 @@ export async function runSetupModelAuthStep(params: {
         runtime,
         config: nextConfig,
         secretInputMode: opts.secretInputMode,
+        setAsPrimary: !params.preserveExistingModelSelection,
       });
       nextConfig = customResult.config;
       prompter.disableBackNavigation?.();
@@ -304,7 +308,10 @@ export async function runSetupModelAuthStep(params: {
       resolvePreferredProviderForAuthChoice,
     });
     const shouldPromptModelSelection =
-      authChoiceFromPrompt || authChoiceModelSelectionPolicy?.promptWhenAuthChoiceProvided;
+      authChoiceFromPrompt ||
+      (authChoiceModelSelectionPolicy.promptWhenAuthChoiceProvided &&
+        (!params.preserveExistingModelSelection ||
+          !authChoiceModelSelectionPolicy.allowKeepCurrent));
     if (shouldPromptModelSelection) {
       const modelSelection = await promptDefaultModel({
         config: nextConfig,
@@ -331,6 +338,7 @@ export async function runSetupModelAuthStep(params: {
     await warnIfModelConfigLooksOff(nextConfig, prompter, {
       agentId: validationTarget.agentId,
       agentDir: validationTarget.agentDir,
+      pendingAuthProfiles: authProfiles,
       validateCatalog: false,
     });
     break;

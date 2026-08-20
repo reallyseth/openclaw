@@ -1,12 +1,12 @@
 // Model list status tests cover status column construction and auth/probe summaries.
+import { createRequireRecord } from "openclaw/plugin-sdk/test-fixtures";
 import { describe, expect, it, type Mock, vi } from "vitest";
+import { createDeferred } from "../../../test/helpers/promise.js";
 import {
   getCurrentPluginMetadataSnapshot,
   setCurrentPluginMetadataSnapshot,
 } from "../../plugins/current-plugin-metadata-snapshot.js";
-import { clearCurrentPluginMetadataSnapshot } from "../../plugins/current-plugin-metadata-state.js";
 import { clearPluginMetadataLifecycleCaches } from "../../plugins/plugin-metadata-lifecycle.js";
-import { createDeferred } from "../../test-utils/deferred.js";
 import { withEnvAsync } from "../../test-utils/env.js";
 
 const mocks = vi.hoisted(() => {
@@ -300,6 +300,7 @@ vi.mock("../../cli/update-cli/plugin-payload-validation.js", () => ({
   runPluginPayloadSmokeCheckForManifestRecords: mocks.runPluginPayloadSmokeCheckForManifestRecords,
 }));
 vi.mock("../../agents/prepared-model-catalog.js", () => ({
+  loadProviderScopedThinkingCatalog: vi.fn(async () => []),
   loadPreparedModelCatalogSnapshot: async (...args: unknown[]) => {
     const entries = await mocks.loadModelCatalog(...args);
     return { entries, routeVariants: mocks.modelCatalogRouteVariants ?? entries };
@@ -349,12 +350,7 @@ function parseFirstJsonLog(runtimeLike: { log: Mock }) {
   return JSON.parse(String(runtimeLike.log.mock.calls[0]?.[0]));
 }
 
-function requireRecord(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== "object" || value === null) {
-    throw new Error(`${label} was not an object`);
-  }
-  return value as Record<string, unknown>;
-}
+const requireRecord = createRequireRecord("object", "label-not-object");
 
 function expectRecordFields(record: Record<string, unknown>, fields: Record<string, unknown>) {
   for (const [key, value] of Object.entries(fields)) {
@@ -554,6 +550,128 @@ async function withOpenAIStatusFixture<T>(
 }
 
 describe("modelsStatusCommand auth overview", () => {
+  it("shows cooldown reasons and recovery guidance in JSON and text output", async () => {
+    const now = Date.now();
+    const store = mocks.store as typeof mocks.store & {
+      usageStats?: Record<string, { cooldownUntil: number; cooldownReason: "session_expired" }>;
+    };
+    store.usageStats = {
+      "anthropic:default": {
+        cooldownUntil: now + 60_000,
+        cooldownReason: "session_expired",
+      },
+    };
+    mocks.resolveProfileUnusableUntilForDisplay.mockImplementation((_store, profileId) =>
+      profileId === "anthropic:default" ? now + 60_000 : undefined,
+    );
+
+    try {
+      const jsonRuntime = createRuntime();
+      await modelsStatusCommand({ json: true }, jsonRuntime as never);
+      expect(parseFirstJsonLog(jsonRuntime).auth.unusableProfiles).toEqual([
+        expect.objectContaining({
+          profileId: "anthropic:default",
+          kind: "cooldown",
+          reason: "session_expired",
+          recoveryHint:
+            "Re-authenticate with `openclaw models auth login --provider anthropic --profile-id 'anthropic:default'`.",
+        }),
+      ]);
+
+      const textRuntime = createRuntime();
+      await modelsStatusCommand({}, textRuntime as never);
+      const output = (textRuntime.log as Mock).mock.calls
+        .map((call: unknown[]) => String(call[0]))
+        .join("\n");
+      expect(output).toContain("Unavailable auth profiles");
+      expect(output).toContain("anthropic:default (anthropic) cooldown:session_expired");
+      expect(output).toContain("openclaw models auth login --provider anthropic");
+    } finally {
+      delete store.usageStats;
+      mocks.resolveProfileUnusableUntilForDisplay.mockReset().mockReturnValue(undefined);
+    }
+  });
+
+  it("shows exact WHAM classification and canonical reason in status JSON", async () => {
+    const now = Date.now();
+    const store = mocks.store as typeof mocks.store & {
+      usageStats?: Record<
+        string,
+        {
+          cooldownUntil: number;
+          cooldownReason: "auth";
+          cooldownClassification: "wham_token_expired";
+        }
+      >;
+    };
+    store.usageStats = {
+      "openai:default": {
+        cooldownUntil: now + 60_000,
+        cooldownReason: "auth",
+        cooldownClassification: "wham_token_expired",
+      },
+    };
+    mocks.resolveProfileUnusableUntilForDisplay.mockImplementation((_store, profileId) =>
+      profileId === "openai:default" ? now + 60_000 : undefined,
+    );
+
+    try {
+      const jsonRuntime = createRuntime();
+      await modelsStatusCommand({ json: true }, jsonRuntime as never);
+      expect(parseFirstJsonLog(jsonRuntime).auth.unusableProfiles).toEqual([
+        expect.objectContaining({
+          profileId: "openai:default",
+          reason: "auth",
+          classification: "wham_token_expired",
+        }),
+      ]);
+
+      const textRuntime = createRuntime();
+      await modelsStatusCommand({}, textRuntime as never);
+      expect(textRuntime.log.mock.calls.flat().join("\n")).toContain("cooldown:wham_token_expired");
+    } finally {
+      delete store.usageStats;
+      mocks.resolveProfileUnusableUntilForDisplay.mockReset().mockReturnValue(undefined);
+    }
+  });
+
+  it("routes legacy Gemini CLI cooldowns to supported Google API-key setup", async () => {
+    const now = Date.now();
+    const profileId = "google-gemini-cli:legacy";
+    const store = mocks.store as typeof mocks.store & {
+      usageStats?: Record<string, { cooldownUntil: number; cooldownReason: "session_expired" }>;
+    };
+    store.profiles[profileId] = {
+      type: "oauth",
+      provider: "google-gemini-cli",
+      access: "legacy-access",
+      refresh: "legacy-refresh",
+      expires: now + 60_000,
+    };
+    store.usageStats = {
+      [profileId]: { cooldownUntil: now + 60_000, cooldownReason: "session_expired" },
+    };
+    mocks.resolveProfileUnusableUntilForDisplay.mockImplementation((_store, candidate) =>
+      candidate === profileId ? now + 60_000 : undefined,
+    );
+
+    try {
+      const statusRuntime = createRuntime();
+      await modelsStatusCommand({ json: true }, statusRuntime as never);
+      const [unusable] = parseFirstJsonLog(statusRuntime).auth.unusableProfiles;
+      expect(unusable).toMatchObject({
+        profileId,
+        provider: "google-gemini-cli",
+        recoveryHint: expect.stringContaining("--provider google`"),
+      });
+      expect(unusable.recoveryHint).not.toContain("--provider google-gemini-cli");
+    } finally {
+      delete store.profiles[profileId];
+      delete store.usageStats;
+      mocks.resolveProfileUnusableUntilForDisplay.mockReset().mockReturnValue(undefined);
+    }
+  });
+
   it("does not restore over plugin metadata published while status is running", async () => {
     const originalLoadModelCatalog = mocks.loadModelCatalog.getMockImplementation();
     const config = mocks.loadConfig();
@@ -561,7 +679,7 @@ describe("modelsStatusCommand auth overview", () => {
     const catalogStarted = createDeferred();
     const releaseCatalog = createDeferred();
     let replacement: ReturnType<typeof getCurrentPluginMetadataSnapshot> = undefined;
-    clearCurrentPluginMetadataSnapshot();
+    clearPluginMetadataLifecycleCaches();
     mocks.loadModelCatalog.mockImplementationOnce(async () => {
       replacement = getCurrentPluginMetadataSnapshot({
         config,
@@ -596,7 +714,7 @@ describe("modelsStatusCommand auth overview", () => {
     } finally {
       releaseCatalog.resolve();
       await commandPromise.catch(() => {});
-      clearCurrentPluginMetadataSnapshot();
+      clearPluginMetadataLifecycleCaches();
       if (originalLoadModelCatalog) {
         mocks.loadModelCatalog.mockImplementation(originalLoadModelCatalog);
       } else {
@@ -629,7 +747,6 @@ describe("modelsStatusCommand auth overview", () => {
         readOnly: true,
       }),
     );
-
     expectResolveAgentDirCalledFor("main");
     expect(mocks.ensureAuthProfileStore).toHaveBeenCalled();
     expect(payload.defaultModel).toBe("anthropic/claude-opus-4-6");
@@ -871,6 +988,51 @@ describe("modelsStatusCommand auth overview", () => {
         });
       },
     );
+  });
+
+  it("uses system-agent storage without changing unscoped model output", async () => {
+    const originalLoadConfig = mocks.loadConfig.getMockImplementation();
+    mocks.loadConfig.mockReturnValue({
+      agents: {
+        ownership: "explicit",
+        defaults: {
+          model: { primary: "anthropic/claude-opus-4-6", fallbacks: [] },
+          systemAgent: { agentId: "jeremiah" },
+        },
+        entries: { main: {}, jeremiah: {} },
+      },
+      models: { providers: {} },
+    });
+    mocks.resolveAgentExplicitModelPrimary.mockClear();
+    mocks.resolveAgentModelFallbacksOverride.mockClear();
+    mocks.loadModelCatalog.mockClear();
+
+    try {
+      await withAgentScopeOverrides(
+        {
+          primary: "openai/gpt-5.6-luna",
+          fallbacks: ["openai/gpt-5.6-sol"],
+        },
+        async () => {
+          const localRuntime = createRuntime();
+          await modelsStatusCommand({ json: true }, localRuntime as never);
+
+          expectResolveAgentDirCalledFor("jeremiah");
+          expect(mocks.resolveAgentExplicitModelPrimary).not.toHaveBeenCalled();
+          expect(mocks.loadModelCatalog).toHaveBeenCalledWith(
+            expect.objectContaining({ agentId: "jeremiah", readOnly: true }),
+          );
+          expect(parseFirstJsonLog(localRuntime)).toMatchObject({
+            defaultModel: "anthropic/claude-opus-4-6",
+            fallbacks: [],
+          });
+        },
+      );
+    } finally {
+      if (originalLoadConfig) {
+        mocks.loadConfig.mockImplementation(originalLoadConfig);
+      }
+    }
   });
 
   it("rejects API-key auth for subscription-only Codex Spark", async () => {

@@ -21,6 +21,7 @@ import { startSessionUpstreamMonitor } from "../sessions/session-upstream-monito
 import type { GatewayCronReconciliation } from "./server-cron-reconciled.js";
 import type { GatewayCronState } from "./server-cron.js";
 import type { startGatewayMaintenanceTimers } from "./server-maintenance.js";
+import type { GatewayContextResolver } from "./server-methods/types.js";
 import {
   createNoopHeartbeatRunner,
   type GatewayRuntimeServiceLogger,
@@ -68,26 +69,26 @@ export function startGatewayCronWithLogging(params: {
   }).catch((err: unknown) => params.logCron.error(`failed to enter start root: ${String(err)}`));
 }
 
-function clearGatewayMaintenanceHandles(maintenance: GatewayMaintenanceHandles | null): void {
+async function clearGatewayMaintenanceHandles(
+  maintenance: GatewayMaintenanceHandles | null,
+): Promise<void> {
   if (!maintenance) {
     return;
   }
-  // Maintenance startup can race shutdown. Clear every interval handle here so
-  // callers can discard partially-created maintenance safely.
+  // Maintenance startup can race shutdown. Stop every owner here and wait for
+  // in-flight media work before discarding its state directory and SQLite handles.
   clearInterval(maintenance.tickInterval);
   clearInterval(maintenance.healthInterval);
   clearInterval(maintenance.dedupeCleanup);
+  await maintenance.stopMediaCleanup();
   clearInterval(maintenance.worktreeCleanup);
-  if (maintenance.mediaCleanup) {
-    clearInterval(maintenance.mediaCleanup);
-  }
   maintenance.skillCuratorCleanup();
 }
 
 /** Runs maintenance that is intentionally delayed until after the gateway is ready. */
 export async function runGatewayPostReadyMaintenance(params: {
   startMaintenance: () => Promise<GatewayMaintenanceHandles | null>;
-  applyMaintenance: (maintenance: GatewayMaintenanceHandles) => void;
+  applyMaintenance: (maintenance: GatewayMaintenanceHandles) => Promise<void> | void;
   shouldStartCron: () => boolean;
   markCronStartHandled: () => void;
   cronState: GatewayCronState;
@@ -100,7 +101,7 @@ export async function runGatewayPostReadyMaintenance(params: {
   try {
     const maintenance = await params.startMaintenance();
     if (maintenance) {
-      params.applyMaintenance(maintenance);
+      await params.applyMaintenance(maintenance);
     }
   } catch (err) {
     params.log.warn(`gateway post-ready maintenance startup failed: ${String(err)}`);
@@ -124,7 +125,7 @@ export function scheduleGatewayPostReadyMaintenance(params: {
   isClosing: () => boolean;
   onStarted?: () => void;
   startMaintenance: () => Promise<GatewayMaintenanceHandles | null>;
-  applyMaintenance: (maintenance: GatewayMaintenanceHandles) => void;
+  applyMaintenance: (maintenance: GatewayMaintenanceHandles) => Promise<void> | void;
   shouldStartCron: () => boolean;
   markCronStartHandled: () => void;
   cronState: GatewayCronState;
@@ -149,17 +150,17 @@ export function scheduleGatewayPostReadyMaintenance(params: {
           if (params.isClosing()) {
             // Maintenance can allocate intervals before shutdown is observed; clear them here
             // instead of handing live timers to a closing gateway.
-            clearGatewayMaintenanceHandles(maintenance);
+            await clearGatewayMaintenanceHandles(maintenance);
             return null;
           }
           return maintenance;
         },
-        applyMaintenance: (maintenance) => {
+        applyMaintenance: async (maintenance) => {
           if (params.isClosing()) {
-            clearGatewayMaintenanceHandles(maintenance);
+            await clearGatewayMaintenanceHandles(maintenance);
             return;
           }
-          params.applyMaintenance(maintenance);
+          await params.applyMaintenance(maintenance);
         },
         shouldStartCron: () => !params.isClosing() && params.shouldStartCron(),
         markCronStartHandled: params.markCronStartHandled,
@@ -201,8 +202,8 @@ function startPendingOutboundDeliveryRecovery(params: {
       if (stopped) {
         return;
       }
-      const { drainPendingDeliveries, recoverPendingDeliveries } =
-        await import("../infra/outbound/delivery-queue.js");
+      const { drainPendingDeliveriesCore, recoverPendingDeliveries } =
+        await import("../infra/outbound/delivery-queue-recovery.js");
       const { deliverOutboundPayloadsInternal } = await import("../infra/outbound/deliver.js");
       if (stopped) {
         return;
@@ -218,7 +219,7 @@ function startPendingOutboundDeliveryRecovery(params: {
       }
       // Startup migration runs once. Normal retries use fresh config so revoked
       // accounts cannot inherit the authority captured at gateway startup.
-      await drainPendingDeliveries({
+      await drainPendingDeliveriesCore({
         drainKey: "gateway:outbound",
         logLabel: "Outbound delivery retry",
         cfg: getRuntimeConfig(),
@@ -270,6 +271,7 @@ function startPendingSessionDeliveryRuntime(params: {
   deps: import("../cli/deps.types.js").CliDeps;
   log: GatewayRuntimeServiceLogger;
   maxEnqueuedAt: number;
+  resolveGatewayContext?: GatewayContextResolver;
 }): () => void {
   let stopped = false;
   let stopRuntime: (() => void) | undefined;
@@ -292,6 +294,9 @@ function startPendingSessionDeliveryRuntime(params: {
             deps: params.deps,
             entry,
             ...(context.stateDir !== undefined ? { stateDir: context.stateDir } : {}),
+            ...(params.resolveGatewayContext
+              ? { resolveGatewayContext: params.resolveGatewayContext }
+              : {}),
           }),
         log: logRecovery,
         onSettled: settleQueuedSessionDelivery,
@@ -301,6 +306,9 @@ function startPendingSessionDeliveryRuntime(params: {
           deps: params.deps,
           log: logRecovery,
           maxEnqueuedAt: params.maxEnqueuedAt,
+          ...(params.resolveGatewayContext
+            ? { resolveGatewayContext: params.resolveGatewayContext }
+            : {}),
         });
       } finally {
         // Recovery and scheduling are independent safeguards. A transient
@@ -331,6 +339,7 @@ export function activateGatewayScheduledServices(params: {
   startCron?: boolean;
   logCron: { error: (message: string) => void };
   log: GatewayRuntimeServiceLogger;
+  resolveGatewayContext?: GatewayContextResolver;
 }): { heartbeatRunner: HeartbeatRunner; stopOutboundDeliveryRecovery: () => Promise<void> } {
   if (params.minimalTestGateway) {
     // Minimal gateways keep handles callable but inert so tests can share shutdown paths with
@@ -361,6 +370,9 @@ export function activateGatewayScheduledServices(params: {
     deps: params.deps,
     log: params.log,
     maxEnqueuedAt: params.sessionDeliveryRecoveryMaxEnqueuedAt,
+    ...(params.resolveGatewayContext
+      ? { resolveGatewayContext: params.resolveGatewayContext }
+      : {}),
   });
   if (params.startCron !== false) {
     startGatewayCronWithLogging({

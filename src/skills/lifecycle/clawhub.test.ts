@@ -25,21 +25,30 @@ const installPackageDirMock = vi.fn();
 const evaluateSkillInstallPolicyMock = vi.fn();
 const pathExistsMock = vi.fn();
 const digestClawHubSkillTreeMock = vi.fn(async () => `sha256:${"a".repeat(64)}`);
+const markClawPackageIndependentlyOwnedMock = vi.fn();
 const tempDirs = createTrackedTempDirs();
 
-vi.mock("../../infra/clawhub.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../infra/clawhub.js")>()),
+vi.mock("../../infra/clawhub-skills.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../infra/clawhub-skills.js")>()),
   fetchClawHubSkillDetail: fetchClawHubSkillDetailMock,
   fetchClawHubSkillInstallResolution: fetchClawHubSkillInstallResolutionMock,
   fetchClawHubSkillVerification: fetchClawHubSkillVerificationMock,
   fetchClawHubSkillSecurityVerdicts: fetchClawHubSkillSecurityVerdictsMock,
+  reportClawHubSkillInstallTelemetry: reportClawHubSkillInstallTelemetryMock,
+  searchClawHubSkills: searchClawHubSkillsMock,
+}));
+
+vi.mock("../../infra/clawhub-artifacts.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../infra/clawhub-artifacts.js")>()),
   downloadClawHubSkillArchive: downloadClawHubSkillArchiveMock,
   downloadClawHubSkillArchiveUrl: downloadClawHubSkillArchiveUrlMock,
   downloadClawHubGitHubSkillArchive: downloadClawHubGitHubSkillArchiveMock,
-  reportClawHubSkillInstallTelemetry: reportClawHubSkillInstallTelemetryMock,
+}));
+
+vi.mock("../../infra/clawhub-client.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../infra/clawhub-client.js")>()),
   isDefaultClawHubBaseUrl: isDefaultClawHubBaseUrlMock,
   resolveClawHubBaseUrl: resolveClawHubBaseUrlMock,
-  searchClawHubSkills: searchClawHubSkillsMock,
 }));
 
 vi.mock("../../infra/install-flow.js", () => ({
@@ -65,6 +74,12 @@ vi.mock("../../infra/fs-safe.js", () => ({
 vi.mock("./skill-tree-digest.js", () => ({
   digestClawHubSkillTree: digestClawHubSkillTreeMock,
 }));
+
+vi.mock("../../state/claw-package-adoption.js", () => ({
+  markClawPackageIndependentlyOwned: markClawPackageIndependentlyOwnedMock,
+}));
+
+const { ClawHubRequestError } = await import("../../infra/clawhub-client.js");
 
 const {
   installSkillFromClawHub,
@@ -211,6 +226,7 @@ describe("skills-clawhub", () => {
     installPackageDirMock.mockReset();
     evaluateSkillInstallPolicyMock.mockReset();
     pathExistsMock.mockReset();
+    markClawPackageIndependentlyOwnedMock.mockReset();
 
     resolveClawHubBaseUrlMock.mockImplementation((baseUrl?: string) =>
       (baseUrl ?? "https://clawhub.ai").replace(/\/+$/, ""),
@@ -338,6 +354,53 @@ describe("skills-clawhub", () => {
       slug: "agentreceipt",
       version: "1.0.0",
     });
+  });
+
+  it.each([
+    {
+      name: "maps missing install resolutions to the skills-info recovery message",
+      lookup: "install",
+      status: 404,
+      path: "/api/v1/skills/missing-skill/install",
+      body: "remote not-found detail",
+      expected:
+        'Skill "missing-skill" not found. Run `openclaw skills list` to see available skills.',
+    },
+    {
+      name: "maps missing versioned skills to the skills-info recovery message",
+      lookup: "detail",
+      status: 404,
+      path: "/custom-clawhub/api/v1/skills/missing-skill",
+      body: "remote versioned not-found detail",
+      expected:
+        'Skill "missing-skill" not found. Run `openclaw skills list` to see available skills.',
+    },
+    {
+      name: "keeps server failures distinct from missing skills",
+      lookup: "install",
+      status: 500,
+      path: "/api/v1/skills/missing-skill/install",
+      body: "remote-controlled server failure",
+      expected:
+        'ClawHub is temporarily unavailable while installing skill "missing-skill". Try again later.',
+    },
+  ] as const)("$name", async ({ lookup, status, path: requestPath, body, expected }) => {
+    const requestError = new ClawHubRequestError({ path: requestPath, status, body });
+    if (lookup === "detail") {
+      fetchClawHubSkillDetailMock.mockRejectedValueOnce(requestError);
+    } else {
+      fetchClawHubSkillInstallResolutionMock.mockRejectedValueOnce(requestError);
+    }
+
+    const result = await installSkillFromClawHub({
+      workspaceDir: "/tmp/workspace",
+      slug: "missing-skill",
+      ...(lookup === "detail" ? { version: "1.2.3" } : {}),
+    });
+
+    expect(result).toEqual({ ok: false, error: expected });
+    expect(result.ok ? "" : result.error).not.toContain("/api/v1/");
+    expect(result.ok ? "" : result.error).not.toContain(body);
   });
 
   it("installs skills-sh references via a ClawHub-approved pinned GitHub commit", async () => {
@@ -1137,6 +1200,13 @@ describe("skills-clawhub", () => {
       ownerHandle: "demo-owner",
       installedVersion: "1.0.0",
     });
+    expect(markClawPackageIndependentlyOwnedMock).toHaveBeenCalledWith({
+      kind: "skill",
+      source: "clawhub",
+      ref: "@demo-owner/weather",
+      version: "1.0.0",
+      workspace: workspaceDir,
+    });
     expect(reportClawHubSkillInstallTelemetryMock).toHaveBeenCalledWith({
       baseUrl: undefined,
       slug: "weather",
@@ -1864,6 +1934,37 @@ describe("skills-clawhub", () => {
       requestedReference: "skills-sh:openclaw/skills/weather",
       trustState: "not-scanned-by-clawhub",
     });
+  });
+
+  it("reports a tracked skill removed from ClawHub with the same recovery message", async () => {
+    const workspaceDir = await tempDirs.make("openclaw-missing-update-");
+    await writeClawHubOriginFixture({
+      workspaceDir,
+      slug: "missing-skill",
+      installedVersion: "0.9.0",
+    });
+    const body = "remote update not-found detail";
+    fetchClawHubSkillInstallResolutionMock.mockRejectedValueOnce(
+      new ClawHubRequestError({
+        path: "/clawhub/api/v1/skills/missing-skill/install",
+        status: 404,
+        body,
+      }),
+    );
+
+    const results = await updateSkillsFromClawHub({
+      workspaceDir,
+      slug: "missing-skill",
+    });
+
+    expect(results).toEqual([
+      {
+        ok: false,
+        error:
+          'Skill "missing-skill" not found. Run `openclaw skills list` to see available skills.',
+      },
+    ]);
+    expect(results[0]?.ok ? "" : results[0]?.error).not.toContain(body);
   });
 
   it("updates official publisher ClawHub skills without fetching security verdicts", async () => {
@@ -3121,6 +3222,7 @@ describe("ClawHub origin provenance readback", () => {
         slug: "agentreceipt",
         installedVersion: "1.0.0",
         installedAt: 123,
+        ownerHandle: "acme",
         sourceUrl,
         artifact,
         skillFile,
@@ -3133,6 +3235,7 @@ describe("ClawHub origin provenance readback", () => {
           version: "1.0.0",
           installedAt: 123,
           registry: "https://clawhub.ai",
+          ownerHandle: "acme",
           sourceUrl,
           artifact,
           skillFile,
@@ -3150,6 +3253,7 @@ describe("ClawHub origin provenance readback", () => {
       if (link?.status !== "linked") {
         throw new Error(`expected linked status, got ${link?.status}`);
       }
+      expect(link.ownerHandle).toBe("acme");
       expect(link.artifact).toEqual(artifact);
       expect(link.skillFile).toEqual(skillFile);
       expect(link.sourceUrl).toBe(sourceUrl);

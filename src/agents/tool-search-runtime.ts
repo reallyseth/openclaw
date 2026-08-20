@@ -30,10 +30,12 @@ import {
 } from "./tool-search-catalog.js";
 import {
   buildLexicalIndex,
+  readParameterText,
   scoreLexical,
   tokenizeDocument,
   tokenizeQuery,
 } from "./tool-search-ranking.js";
+import { readToolSearchLimit } from "./tool-search-request.js";
 import { snapshotToolSearchTargetTranscriptResult } from "./tool-search-transcript.js";
 import type {
   CatalogSource,
@@ -74,30 +76,6 @@ function toolSearchEntryText(entry: ToolSearchCatalogEntry, parameterText?: stri
   return [entry.name, entry.id, entry.label ?? "", entry.description, parameters]
     .filter(Boolean)
     .join(" ");
-}
-
-/** Collects property names and descriptions from a JSON-Schema-shaped value. */
-function readParameterText(parameters: unknown, depth = 0): string {
-  if (depth > 4 || !isRecord(parameters)) {
-    return "";
-  }
-  const parts: string[] = [];
-  const description = parameters.description;
-  if (typeof description === "string") {
-    parts.push(description);
-  }
-  const properties = parameters.properties;
-  if (isRecord(properties)) {
-    for (const [name, child] of Object.entries(properties)) {
-      parts.push(name);
-      parts.push(readParameterText(child, depth + 1));
-    }
-  }
-  const items = parameters.items;
-  if (items !== undefined) {
-    parts.push(readParameterText(items, depth + 1));
-  }
-  return parts.filter(Boolean).join(" ");
 }
 
 function tokenizeLookupValue(input: string): Set<string> {
@@ -201,39 +179,20 @@ function findEntryByExactId(
   return entry;
 }
 
+const TOOL_SEARCH_SELECTOR_KEYS = ["id", "toolId", "name"] as const;
+
+function readToolSearchSelector(params: Record<string, unknown>): string | undefined {
+  const value = params.id ?? params.toolId ?? params.name;
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
 export function readToolSearchId(args: unknown): string {
   const params = asToolParamsRecord(args);
-  const value = params.id ?? params.toolId ?? params.name;
-  if (typeof value !== "string" || !value.trim()) {
+  const value = readToolSearchSelector(params);
+  if (value === undefined) {
     throw new ToolInputError("id must be a non-empty string.");
   }
   return value.trim();
-}
-
-function readToolSearchLimit(value: unknown, config: ToolSearchConfig): number {
-  if (value === undefined) {
-    return config.searchDefaultLimit;
-  }
-  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
-    throw new ToolInputError("limit must be a positive integer.");
-  }
-  return Math.min(value, config.maxSearchLimit);
-}
-
-export function readToolSearchArgs(
-  args: unknown,
-  config: ToolSearchConfig,
-): { query: string; limit: number } {
-  const params = asToolParamsRecord(args);
-  const query = params.query;
-  if (typeof query !== "string") {
-    throw new ToolInputError("query must be a string.");
-  }
-  const options = isRecord(params.options) ? params.options : undefined;
-  return {
-    query,
-    limit: readToolSearchLimit(params.limit ?? options?.limit, config),
-  };
 }
 
 export function readToolSearchCallArgs(
@@ -241,14 +200,21 @@ export function readToolSearchCallArgs(
   catalog?: ToolSearchCatalogSession,
 ): { id: string; input: unknown } {
   const params = asToolParamsRecord(args);
+  const dottedInput = Object.fromEntries(
+    Object.entries(params)
+      .filter(([key]) => key.startsWith("args.") && key.length > 5)
+      .map(([key, value]) => [key.slice(5), value]),
+  );
   const nestedInput = params.args ?? params.input;
   if (nestedInput != null) {
-    return { id: readToolSearchId(params), input: nestedInput };
+    return {
+      id: readToolSearchId(params),
+      input: isRecord(nestedInput) ? { ...dottedInput, ...nestedInput } : nestedInput,
+    };
   }
 
-  const selectorKeys = ["id", "toolId", "name"] as const;
   const matchingSelectors = catalog
-    ? selectorKeys.flatMap((key) => {
+    ? TOOL_SEARCH_SELECTOR_KEYS.flatMap((key) => {
         const value = params[key];
         if (typeof value !== "string") {
           return [];
@@ -268,7 +234,7 @@ export function readToolSearchCallArgs(
     );
   }
   const matchingSelector = matchingSelectors[0]?.key;
-  const selector = matchingSelector ?? selectorKeys.find((key) => params[key] != null);
+  const selector = matchingSelector ?? TOOL_SEARCH_SELECTOR_KEYS.find((key) => params[key] != null);
   const id = readToolSearchId(selector ? { [selector]: params[selector] } : params);
 
   // Remove every alias that actually identifies the selected catalog tool;
@@ -279,10 +245,27 @@ export function readToolSearchCallArgs(
     ...matchingSelectors.map(({ key }) => key),
     ...(matchingSelector ? [] : [selector ?? "id"]),
   ]);
+  const targetInputEntries = Object.entries(params).filter(([key]) => !wrapperKeys.has(key));
   const flattenedInput = Object.fromEntries(
-    Object.entries(params).filter(([key]) => !wrapperKeys.has(key)),
+    targetInputEntries.filter(([key]) => !(key.startsWith("args.") && key.length > 5)),
   );
-  return { id, input: flattenedInput };
+  return { id, input: { ...dottedInput, ...flattenedInput } };
+}
+
+export function prepareToolSearchDispatcherArguments(args: unknown): unknown {
+  if (!isRecord(args) || TOOL_SEARCH_SELECTOR_KEYS.some((key) => Object.hasOwn(args, key))) {
+    return args;
+  }
+  const nestedInput = args.args ?? args.input;
+  if (!isRecord(nestedInput)) {
+    return args;
+  }
+  const selectorValue = readToolSearchSelector(nestedInput);
+  if (selectorValue === undefined) {
+    return args;
+  }
+  const { args: _wrappedArgs, input: _wrappedInput, ...outerRest } = args;
+  return { ...outerRest, ...nestedInput, id: selectorValue };
 }
 
 function getTelemetry(catalog: ToolSearchCatalogSession) {
@@ -468,6 +451,7 @@ function sanitizeToolCallIdPart(value: string): string {
 
 export class ToolSearchRuntime {
   private callSequence = 0;
+  private readonly terminalTargetBatchByParent = new Map<string, boolean>();
   private readonly networkInvocations = new Map<string, { active: number; observed: boolean }>();
   private readonly searchIndexes = new WeakMap<
     ToolSearchCatalogSession,
@@ -590,6 +574,16 @@ export class ToolSearchRuntime {
       : this.networkInvocations.size > 0;
   }
 
+  takeTerminalTargetBatch(parentToolCallId?: string): boolean {
+    const parent =
+      parentToolCallId ??
+      (this.terminalTargetBatchByParent.size === 1
+        ? (this.terminalTargetBatchByParent.keys().next().value ?? "")
+        : "");
+    const terminal = this.terminalTargetBatchByParent.get(parent) === true;
+    return this.terminalTargetBatchByParent.delete(parent) && terminal;
+  }
+
   isReplaySafeExactId = (id: string): boolean => {
     let entry: ToolSearchCatalogEntry;
     try {
@@ -707,6 +701,14 @@ export class ToolSearchRuntime {
         )
       : await runExecution();
     const acceptedResult = await acceptResultBeforeProjection(result);
+    const parentToolCallId = options?.parentToolCallId;
+    if (parentToolCallId) {
+      this.terminalTargetBatchByParent.set(
+        parentToolCallId,
+        this.terminalTargetBatchByParent.get(parentToolCallId) !== false &&
+          acceptedResult.terminate === true,
+      );
+    }
     return { tool: compactToolSearchCatalogEntry(entry), result: acceptedResult };
   };
 
@@ -720,18 +722,22 @@ export function formatToolSearchControlResult<T>(
   payload: T,
   runtime: ToolSearchRuntime | undefined,
   parentToolCallId?: string,
+  terminalBatchStatus?: "waiting" | "completed" | "failed",
 ): AgentToolResult<T> {
-  const result = jsonResult(payload);
+  let result: AgentToolResult<T> = jsonResult(payload);
   const content = result.content[0];
-  if (!runtime?.hasNetworkContent(parentToolCallId) || content?.type !== "text") {
-    return result;
+  if (runtime?.hasNetworkContent(parentToolCallId) && content?.type === "text") {
+    const bounded = truncateSanitizedExternalContent(content.text, 20_000);
+    const modelText = bounded.truncated
+      ? `${truncateSanitizedExternalContent(content.text, 19_988).text}\n[truncated]`
+      : bounded.text;
+    const text = wrapExternalContent(modelText, { source: "api" });
+    result = { ...result, content: [{ ...content, text }] };
   }
-  const bounded = truncateSanitizedExternalContent(content.text, 20_000);
-  const modelText = bounded.truncated
-    ? `${truncateSanitizedExternalContent(content.text, 19_988).text}\n[truncated]`
-    : bounded.text;
-  const text = wrapExternalContent(modelText, { source: "api" });
-  return { ...result, content: [{ ...content, text }] };
+  const terminal =
+    terminalBatchStatus !== "waiting" &&
+    runtime?.takeTerminalTargetBatch(parentToolCallId) === true;
+  return terminalBatchStatus !== "failed" && terminal ? { ...result, terminate: true } : result;
 }
 
 /** Keep dynamic failures rejected without exposing network-controlled error text. */

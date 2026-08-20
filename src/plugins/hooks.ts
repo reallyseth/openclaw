@@ -6,13 +6,15 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import { createHash } from "node:crypto";
 import { clampPositiveTimerTimeoutMs } from "@openclaw/normalization-core/number-coercion";
+import { isPromiseLike } from "@openclaw/normalization-core/promise-like";
 import { isToolAllowedByPolicyName } from "../agents/tool-policy-match.js";
 import {
   attachToolAllowlistIntersection,
   expandToolGroups,
   normalizeToolList,
-  normalizeToolName,
+  normalizeToolPolicyName,
   readToolAllowlistIntersection,
 } from "../agents/tool-policy.js";
 import { copyReplyPayloadMetadata, type ReplyPayload } from "../auto-reply/reply-payload.js";
@@ -86,8 +88,6 @@ import type {
   PluginHookSubagentContext,
   PluginHookSubagentDeliveryTargetEvent,
   PluginHookSubagentDeliveryTargetResult,
-  PluginHookSubagentSpawningEvent,
-  PluginHookSubagentSpawningResult,
   PluginHookSubagentEndedEvent,
   PluginHookSubagentProgressEvent,
   PluginHookSubagentSpawnedEvent,
@@ -95,6 +95,7 @@ import type {
   PluginHookToolResultPersistContext,
   PluginHookToolResultPersistEvent,
   PluginHookToolResultPersistResult,
+  PluginHookToolAuthority,
   PluginHookBeforeMessageWriteEvent,
   PluginHookBeforeMessageWriteResult,
   PluginHookBeforeInstallContext,
@@ -224,6 +225,8 @@ type ModifyingHookPolicy<K extends PluginHookName, TResult> = {
   shouldStop?: (result: TResult) => boolean;
   terminalLabel?: string;
   onTerminal?: (params: { hookName: K; pluginId: string; result: TResult }) => void;
+  includeRegistration?: (registration: PluginHookRegistration<K>) => boolean;
+  assertHandlerBoundaryActive?: () => void;
 };
 
 type PluginTargetedInboundClaimOutcome =
@@ -417,7 +420,7 @@ export function createHookRunner(
     }
     return [...new Set(normalizeToolList([...normalizedLeft, ...normalizedRight]))].filter(
       (name) => {
-        const normalized = normalizeToolName(name);
+        const normalized = normalizeToolPolicyName(name);
         return (
           isToolAllowedByPolicyName(normalized, { allow: normalizedLeft }) &&
           isToolAllowedByPolicyName(normalized, { allow: normalizedRight })
@@ -565,24 +568,6 @@ export function createHookRunner(
     return next.action === "continue" ? { action: "continue", reason: next.reason } : (acc ?? next);
   };
 
-  const mergeSubagentSpawningResult = (
-    acc: PluginHookSubagentSpawningResult | undefined,
-    next: PluginHookSubagentSpawningResult,
-  ): PluginHookSubagentSpawningResult => {
-    if (acc?.status === "error") {
-      return acc;
-    }
-    if (next.status === "error") {
-      return next;
-    }
-    const deliveryOrigin = acc?.deliveryOrigin ?? next.deliveryOrigin;
-    return {
-      status: "ok",
-      threadBindingReady: Boolean(acc?.threadBindingReady || next.threadBindingReady),
-      ...(deliveryOrigin ? { deliveryOrigin } : {}),
-    };
-  };
-
   const mergeSubagentDeliveryTargetResult = (
     acc: PluginHookSubagentDeliveryTargetResult | undefined,
     next: PluginHookSubagentDeliveryTargetResult,
@@ -614,13 +599,6 @@ export function createHookRunner(
 
   const getPluginPackageVersion = (pluginId: string): string | undefined =>
     registry.plugins.find((plugin) => plugin.id === pluginId)?.packageVersion;
-
-  const isPromiseLike = (value: unknown): value is PromiseLike<unknown> => {
-    if ((typeof value !== "object" && typeof value !== "function") || value === null) {
-      return false;
-    }
-    return typeof (value as { then?: unknown }).then === "function";
-  };
 
   const normalizePositiveTimeoutMs = (timeoutMs: number | undefined): number | undefined => {
     return clampPositiveTimerTimeoutMs(timeoutMs);
@@ -739,15 +717,20 @@ export function createHookRunner(
     matcherToolName?: string,
   ): Promise<TResult | undefined> {
     const hooks = getHooksForName(registry, hookName, undefined, matcherToolName);
-    if (hooks.length === 0) {
+    const selectedHooks = policy.includeRegistration
+      ? hooks.filter(policy.includeRegistration)
+      : hooks;
+    if (selectedHooks.length === 0) {
       return undefined;
     }
 
-    logger?.debug?.(`[hooks] running ${hookName} (${hooks.length} handlers, sequential)`);
+    logger?.debug?.(`[hooks] running ${hookName} (${selectedHooks.length} handlers, sequential)`);
 
     let result: TResult | undefined;
 
-    for (const hook of hooks) {
+    for (const hook of selectedHooks) {
+      policy.assertHandlerBoundaryActive?.();
+      let shouldStop = false;
       try {
         const handler = hook.handler as (event: unknown, ctx: unknown) => Promise<TResult>;
         const handlerEvent = policy.isolateEventPerHandler
@@ -772,7 +755,7 @@ export function createHookRunner(
               `[hooks] ${hookName}${terminalLabel} decided by ${hook.pluginId} (priority=${priority}); skipping remaining handlers`,
             );
             policy.onTerminal?.({ hookName, pluginId: hook.pluginId, result });
-            break;
+            shouldStop = true;
           }
         }
       } catch (err) {
@@ -780,6 +763,10 @@ export function createHookRunner(
           throw err;
         }
         handleHookError({ hookName, pluginId: hook.pluginId, error: err });
+      }
+      policy.assertHandlerBoundaryActive?.();
+      if (shouldStop) {
+        break;
       }
     }
 
@@ -960,12 +947,78 @@ export function createHookRunner(
           "before_prompt_build",
           event,
           ctx,
-          { mergeResults: mergeBeforePromptBuild },
+          {
+            mergeResults: mergeBeforePromptBuild,
+            includeRegistration: (registration) => registration.requiresToolAuthority !== true,
+          },
         );
       } finally {
         token.active = false;
       }
     });
+  }
+
+  /** Runs context enrichment only after the host has finalized the turn's tool surface. */
+  async function runAuthorizedPromptBuild(
+    event: PluginHookBeforePromptBuildEvent,
+    ctx: PluginHookAgentContext,
+    params: {
+      toolAuthorityFingerprint: string;
+      activeToolNames: readonly string[];
+      assertHostActive: () => void;
+    },
+  ): Promise<PluginHookBeforePromptBuildResult | undefined> {
+    const sourceFingerprint = params.toolAuthorityFingerprint.trim();
+    if (!sourceFingerprint) {
+      return undefined;
+    }
+    const activeToolNames = [
+      ...new Set(params.activeToolNames.map(normalizeToolPolicyName).filter(Boolean)),
+    ].toSorted();
+    const activeToolNameSet = new Set(activeToolNames);
+    const token = { active: true };
+    const assertActive = () => {
+      if (!token.active) {
+        throw new Error("prompt tool authority is no longer active");
+      }
+      params.assertHostActive();
+    };
+    const authority: PluginHookToolAuthority = Object.freeze({
+      fingerprint: createHash("sha256")
+        .update(sourceFingerprint)
+        .update("\0")
+        .update(activeToolNames.join("\0"))
+        .digest("hex"),
+      allows(toolName: string): boolean {
+        assertActive();
+        return activeToolNameSet.has(normalizeToolPolicyName(toolName));
+      },
+      assertActive,
+    });
+    try {
+      const result = await runModifyingHook<
+        "before_prompt_build",
+        PluginHookBeforePromptBuildResult
+      >(
+        "before_prompt_build",
+        event,
+        { ...ctx, toolAuthority: authority },
+        {
+          mergeResults: mergeBeforePromptBuild,
+          includeRegistration: (registration) => registration.requiresToolAuthority === true,
+          assertHandlerBoundaryActive: assertActive,
+        },
+      );
+      if (!result) {
+        return undefined;
+      }
+      return {
+        ...(result.prependContext ? { prependContext: result.prependContext } : {}),
+        ...(result.appendContext ? { appendContext: result.appendContext } : {}),
+      };
+    } finally {
+      token.active = false;
+    }
   }
 
   async function runAgentTurnPrepare(
@@ -997,30 +1050,6 @@ export function createHookRunner(
   }
 
   /**
-   * Run model_call_started hook.
-   * Allows plugins to observe sanitized model-call metadata.
-   * Runs in parallel (fire-and-forget).
-   */
-  async function runModelCallStarted(
-    event: PluginHookModelCallStartedEvent,
-    ctx: PluginHookAgentContext,
-  ): Promise<void> {
-    return runVoidHook("model_call_started", event, ctx);
-  }
-
-  /**
-   * Run model_call_ended hook.
-   * Allows plugins to observe sanitized terminal model-call metadata.
-   * Runs in parallel (fire-and-forget).
-   */
-  async function runModelCallEnded(
-    event: PluginHookModelCallEndedEvent,
-    ctx: PluginHookAgentContext,
-  ): Promise<void> {
-    return runVoidHook("model_call_ended", event, ctx);
-  }
-
-  /**
    * Run agent_end hook.
    * Allows plugins to analyze completed conversations.
    * Runs handlers in parallel.
@@ -1031,24 +1060,6 @@ export function createHookRunner(
     optionsLocal?: VoidHookRunOptions,
   ): Promise<void> {
     return runVoidHook("agent_end", withAgentRunId(event, ctx), ctx, optionsLocal);
-  }
-
-  /**
-   * Run llm_input hook.
-   * Allows plugins to observe the exact input payload sent to the LLM.
-   * Runs in parallel (fire-and-forget).
-   */
-  async function runLlmInput(event: PluginHookLlmInputEvent, ctx: PluginHookAgentContext) {
-    return runVoidHook("llm_input", event, ctx);
-  }
-
-  /**
-   * Run llm_output hook.
-   * Allows plugins to observe the exact output payload returned by the LLM.
-   * Runs in parallel (fire-and-forget).
-   */
-  async function runLlmOutput(event: PluginHookLlmOutputEvent, ctx: PluginHookAgentContext) {
-    return runVoidHook("llm_output", event, ctx);
   }
 
   /**
@@ -1086,18 +1097,6 @@ export function createHookRunner(
     ctx: PluginHookAgentContext,
   ): Promise<void> {
     return runVoidHook("after_compaction", event, ctx);
-  }
-
-  /**
-   * Run before_reset hook.
-   * Fired when /new or /reset clears a session, before messages are lost.
-   * Runs in parallel (fire-and-forget).
-   */
-  async function runBeforeReset(
-    event: PluginHookBeforeResetEvent,
-    ctx: PluginHookAgentContext,
-  ): Promise<void> {
-    return runVoidHook("before_reset", event, ctx);
   }
 
   // =========================================================================
@@ -1143,28 +1142,6 @@ export function createHookRunner(
       event,
       ctx,
     );
-  }
-
-  /**
-   * Run message_received hook.
-   * Runs in parallel (fire-and-forget).
-   */
-  async function runMessageReceived(
-    event: PluginHookMessageReceivedEvent,
-    ctx: PluginHookMessageContext,
-  ): Promise<void> {
-    return runVoidHook("message_received", event, ctx);
-  }
-
-  /**
-   * Run channel_pairing_requested hook.
-   * Observation-only; slow/failing handlers must not block pairing flow.
-   */
-  async function runChannelPairingRequested(
-    event: Parameters<PluginHookHandlerMap["channel_pairing_requested"]>[0],
-    ctx: Parameters<PluginHookHandlerMap["channel_pairing_requested"]>[1],
-  ): Promise<void> {
-    return runVoidHook("channel_pairing_requested", event, ctx);
   }
 
   /**
@@ -1294,17 +1271,6 @@ export function createHookRunner(
         terminalLabel: "cancel=true",
       },
     );
-  }
-
-  /**
-   * Run message_sent hook.
-   * Runs in parallel (fire-and-forget).
-   */
-  async function runMessageSent(
-    event: PluginHookMessageSentEvent,
-    ctx: PluginHookMessageContext,
-  ): Promise<void> {
-    return runVoidHook("message_sent", event, ctx);
   }
 
   /**
@@ -1525,45 +1491,6 @@ export function createHookRunner(
   // =========================================================================
 
   /**
-   * Run session_start hook.
-   * Runs in parallel (fire-and-forget).
-   */
-  async function runSessionStart(
-    event: PluginHookSessionStartEvent,
-    ctx: PluginHookSessionContext,
-  ): Promise<void> {
-    return runVoidHook("session_start", event, ctx);
-  }
-
-  /**
-   * Run session_end hook.
-   * Runs in parallel (fire-and-forget).
-   */
-  async function runSessionEnd(
-    event: PluginHookSessionEndEvent,
-    ctx: PluginHookSessionContext,
-  ): Promise<void> {
-    return runVoidHook("session_end", event, ctx);
-  }
-
-  /**
-   * @deprecated Core prepares thread-bound subagent bindings through channel
-   * session-binding adapters before subagent_spawned fires. This remains only
-   * for older plugins that call the hook runner directly.
-   */
-  async function runSubagentSpawning(
-    event: PluginHookSubagentSpawningEvent,
-    ctx: PluginHookSubagentContext,
-  ): Promise<PluginHookSubagentSpawningResult | undefined> {
-    return runModifyingHook<"subagent_spawning", PluginHookSubagentSpawningResult>(
-      "subagent_spawning",
-      event,
-      ctx,
-      { mergeResults: mergeSubagentSpawningResult },
-    );
-  }
-
-  /**
    * Run subagent_delivery_target hook.
    * Runs sequentially so channel plugins can deterministically resolve routing.
    */
@@ -1579,61 +1506,9 @@ export function createHookRunner(
     );
   }
 
-  /**
-   * Run subagent_spawned hook.
-   * Runs in parallel (fire-and-forget).
-   */
-  async function runSubagentSpawned(
-    event: PluginHookSubagentSpawnedEvent,
-    ctx: PluginHookSubagentContext,
-  ): Promise<void> {
-    return runVoidHook("subagent_spawned", event, ctx);
-  }
-
-  /** Run portable subagent progress presentation hooks. */
-  async function runSubagentProgress(
-    event: PluginHookSubagentProgressEvent,
-    ctx: PluginHookSubagentContext,
-  ): Promise<void> {
-    return runVoidHook("subagent_progress", event, ctx);
-  }
-
-  /**
-   * Run subagent_ended hook.
-   * Runs in parallel (fire-and-forget).
-   */
-  async function runSubagentEnded(
-    event: PluginHookSubagentEndedEvent,
-    ctx: PluginHookSubagentContext,
-  ): Promise<void> {
-    return runVoidHook("subagent_ended", event, ctx);
-  }
-
   // =========================================================================
   // Gateway Hooks
   // =========================================================================
-
-  /**
-   * Run gateway_start hook.
-   * Runs in parallel (fire-and-forget).
-   */
-  async function runGatewayStart(
-    event: PluginHookGatewayStartEvent,
-    ctx: PluginHookGatewayContext,
-  ): Promise<void> {
-    return runVoidHook("gateway_start", event, ctx);
-  }
-
-  /**
-   * Run gateway_stop hook.
-   * Runs in parallel (fire-and-forget).
-   */
-  async function runGatewayStop(
-    event: PluginHookGatewayStopEvent,
-    ctx: PluginHookGatewayContext,
-  ): Promise<void> {
-    return runVoidHook("gateway_stop", event, ctx);
-  }
 
   async function runHeartbeatPromptContribution(
     event: PluginHeartbeatPromptContributionEvent,
@@ -1643,26 +1518,6 @@ export function createHookRunner(
       "heartbeat_prompt_contribution",
       PluginHeartbeatPromptContributionResult
     >("heartbeat_prompt_contribution", event, ctx, { mergeResults: mergeAgentTurnPrepare });
-  }
-
-  /**
-   * Run cron_reconciled after the Gateway scheduler reaches a complete state.
-   */
-  async function runCronReconciled(
-    event: PluginHookCronReconciledEvent,
-    ctx: PluginHookCronReconciledContext,
-  ): Promise<void> {
-    return runVoidHook("cron_reconciled", event, ctx);
-  }
-
-  /**
-   * Run cron_changed hook for gateway-owned cron lifecycle changes.
-   */
-  async function runCronChanged(
-    event: PluginHookCronChangedEvent,
-    ctx: PluginHookGatewayContext,
-  ): Promise<void> {
-    return runVoidHook("cron_changed", event, ctx);
   }
 
   // =========================================================================
@@ -1809,29 +1664,54 @@ export function createHookRunner(
     runBeforeModelResolve,
     runAgentTurnPrepare,
     runBeforePromptBuild,
+    runAuthorizedPromptBuild,
     runBeforeAgentReply,
-    runModelCallStarted,
-    runModelCallEnded,
-    runLlmInput,
-    runLlmOutput,
+    runModelCallStarted: async (
+      event: PluginHookModelCallStartedEvent,
+      ctx: PluginHookAgentContext,
+    ): Promise<void> => runVoidHook("model_call_started", event, ctx),
+    runModelCallEnded: async (
+      event: PluginHookModelCallEndedEvent,
+      ctx: PluginHookAgentContext,
+    ): Promise<void> => runVoidHook("model_call_ended", event, ctx),
+    runLlmInput: async (
+      event: PluginHookLlmInputEvent,
+      ctx: PluginHookAgentContext,
+    ): Promise<void> => runVoidHook("llm_input", event, ctx),
+    runLlmOutput: async (
+      event: PluginHookLlmOutputEvent,
+      ctx: PluginHookAgentContext,
+    ): Promise<void> => runVoidHook("llm_output", event, ctx),
     runBeforeAgentFinalize,
     runAgentEnd,
     runBeforeCompaction,
     runAfterCompaction,
-    runBeforeReset,
+    runBeforeReset: async (
+      event: PluginHookBeforeResetEvent,
+      ctx: PluginHookAgentContext,
+    ): Promise<void> => runVoidHook("before_reset", event, ctx),
     // Lifecycle gate hooks
     runBeforeAgentRun,
     // Message hooks
     runInboundClaim,
     runInboundClaimForPlugin,
     runInboundClaimForPluginOutcome,
-    runChannelPairingRequested,
-    runMessageReceived,
+    runChannelPairingRequested: async (
+      event: Parameters<PluginHookHandlerMap["channel_pairing_requested"]>[0],
+      ctx: Parameters<PluginHookHandlerMap["channel_pairing_requested"]>[1],
+    ): Promise<void> => runVoidHook("channel_pairing_requested", event, ctx),
+    runMessageReceived: async (
+      event: PluginHookMessageReceivedEvent,
+      ctx: PluginHookMessageContext,
+    ): Promise<void> => runVoidHook("message_received", event, ctx),
     runBeforeDispatch,
     runReplyDispatch,
     runReplyPayloadSending,
     runMessageSending,
-    runMessageSent,
+    runMessageSent: async (
+      event: PluginHookMessageSentEvent,
+      ctx: PluginHookMessageContext,
+    ): Promise<void> => runVoidHook("message_sent", event, ctx),
     // Tool hooks
     runBeforeToolCall,
     runAfterToolCall,
@@ -1839,19 +1719,45 @@ export function createHookRunner(
     // Message write hooks
     runBeforeMessageWrite,
     // Session hooks
-    runSessionStart,
-    runSessionEnd,
-    runSubagentSpawning,
+    runSessionStart: async (
+      event: PluginHookSessionStartEvent,
+      ctx: PluginHookSessionContext,
+    ): Promise<void> => runVoidHook("session_start", event, ctx),
+    runSessionEnd: async (
+      event: PluginHookSessionEndEvent,
+      ctx: PluginHookSessionContext,
+    ): Promise<void> => runVoidHook("session_end", event, ctx),
     runSubagentDeliveryTarget,
-    runSubagentSpawned,
-    runSubagentProgress,
-    runSubagentEnded,
+    runSubagentSpawned: async (
+      event: PluginHookSubagentSpawnedEvent,
+      ctx: PluginHookSubagentContext,
+    ): Promise<void> => runVoidHook("subagent_spawned", event, ctx),
+    runSubagentProgress: async (
+      event: PluginHookSubagentProgressEvent,
+      ctx: PluginHookSubagentContext,
+    ): Promise<void> => runVoidHook("subagent_progress", event, ctx),
+    runSubagentEnded: async (
+      event: PluginHookSubagentEndedEvent,
+      ctx: PluginHookSubagentContext,
+    ): Promise<void> => runVoidHook("subagent_ended", event, ctx),
     // Gateway hooks
-    runGatewayStart,
-    runGatewayStop,
+    runGatewayStart: async (
+      event: PluginHookGatewayStartEvent,
+      ctx: PluginHookGatewayContext,
+    ): Promise<void> => runVoidHook("gateway_start", event, ctx),
+    runGatewayStop: async (
+      event: PluginHookGatewayStopEvent,
+      ctx: PluginHookGatewayContext,
+    ): Promise<void> => runVoidHook("gateway_stop", event, ctx),
     runHeartbeatPromptContribution,
-    runCronReconciled,
-    runCronChanged,
+    runCronReconciled: async (
+      event: PluginHookCronReconciledEvent,
+      ctx: PluginHookCronReconciledContext,
+    ): Promise<void> => runVoidHook("cron_reconciled", event, ctx),
+    runCronChanged: async (
+      event: PluginHookCronChangedEvent,
+      ctx: PluginHookGatewayContext,
+    ): Promise<void> => runVoidHook("cron_changed", event, ctx),
     // Skill hooks
     runSkillProposalEvaluate,
     runSkillProposalChanged,
@@ -1869,10 +1775,6 @@ export type HookRunner = ReturnType<typeof createHookRunner>;
 
 export type SubagentLifecycleHookRunner = Pick<
   HookRunner,
-  | "hasHooks"
-  | "runSubagentSpawning"
-  | "runSubagentSpawned"
-  | "runSubagentProgress"
-  | "runSubagentEnded"
+  "hasHooks" | "runSubagentSpawned" | "runSubagentProgress" | "runSubagentEnded"
 >;
 /* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

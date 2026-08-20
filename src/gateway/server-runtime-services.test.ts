@@ -19,9 +19,9 @@ function waitForFast<T>(
 type StartSessionDeliveryRuntime =
   typeof import("../infra/session-delivery-queue-runtime.js").startSessionDeliveryRuntime;
 type DrainPendingDeliveries =
-  typeof import("../infra/outbound/delivery-queue.js").drainPendingDeliveries;
+  typeof import("../infra/outbound/delivery-queue-recovery.js").drainPendingDeliveriesCore;
 type RecoverPendingDeliveries =
-  typeof import("../infra/outbound/delivery-queue.js").recoverPendingDeliveries;
+  typeof import("../infra/outbound/delivery-queue-recovery.js").recoverPendingDeliveries;
 
 const hoisted = vi.hoisted(() => {
   const heartbeatRunner = {
@@ -70,19 +70,14 @@ vi.mock("../sessions/session-upstream-monitor.js", () => ({
   startSessionUpstreamMonitor: hoisted.startSessionUpstreamMonitor,
 }));
 
-vi.mock("../infra/env.js", () => ({
-  isTruthyEnvValue: (value?: string) =>
-    ["1", "true", "yes", "on"].includes(value?.trim().toLowerCase() ?? ""),
-}));
-
 vi.mock("../infra/outbound/deliver.js", () => ({
   deliverOutboundPayloads: hoisted.deliverOutboundPayloads,
   deliverOutboundPayloadsInternal: hoisted.deliverOutboundPayloads,
 }));
 
-vi.mock("../infra/outbound/delivery-queue.js", () => ({
+vi.mock("../infra/outbound/delivery-queue-recovery.js", () => ({
   recoverPendingDeliveries: hoisted.recoverPendingDeliveries,
-  drainPendingDeliveries: hoisted.drainPendingDeliveries,
+  drainPendingDeliveriesCore: hoisted.drainPendingDeliveries,
 }));
 
 vi.mock("../infra/session-delivery-queue-runtime.js", () => ({
@@ -342,7 +337,11 @@ describe("server-runtime-services", () => {
   it("activates heartbeat, cron, and delivery recovery after sidecars are ready", async () => {
     vi.useFakeTimers();
     const log = createLog();
-    const { cronStart, services } = activateScheduledServicesForTest({ log });
+    const resolveGatewayContext = () => undefined;
+    const { cronStart, services } = activateScheduledServicesForTest({
+      log,
+      resolveGatewayContext,
+    });
 
     expect(hoisted.startHeartbeatRunner).toHaveBeenCalledTimes(1);
     expect(cronStart).toHaveBeenCalledTimes(1);
@@ -365,6 +364,7 @@ describe("server-runtime-services", () => {
       deps: {},
       maxEnqueuedAt: 123,
       log: sessionDeliveryLog,
+      resolveGatewayContext,
     });
     const runtimeParams = hoisted.startSessionDeliveryRuntime.mock.calls[0]?.[0] as
       | {
@@ -838,12 +838,14 @@ describe("server-runtime-services", () => {
     await Promise.resolve();
 
     expect(applyMaintenance).not.toHaveBeenCalled();
+    expect(maintenance.startMediaCleanup).not.toHaveBeenCalled();
+    expect(maintenance.stopMediaCleanup).toHaveBeenCalledTimes(1);
     expect(cron.start).not.toHaveBeenCalled();
     expect(recordPostReadyMemory).not.toHaveBeenCalled();
     expect(clearIntervalSpy).toHaveBeenCalledWith(maintenance.tickInterval);
     expect(clearIntervalSpy).toHaveBeenCalledWith(maintenance.healthInterval);
     expect(clearIntervalSpy).toHaveBeenCalledWith(maintenance.dedupeCleanup);
-    expect(clearIntervalSpy).toHaveBeenCalledWith(maintenance.mediaCleanup);
+    expect(maintenance.stopMediaCleanup).toHaveBeenCalledTimes(1);
     expect(clearIntervalSpy).toHaveBeenCalledWith(maintenance.worktreeCleanup);
   });
 
@@ -957,7 +959,8 @@ function createMaintenanceHandles() {
     tickInterval: setInterval(() => undefined, 60_000),
     healthInterval: setInterval(() => undefined, 60_000),
     dedupeCleanup: setInterval(() => undefined, 60_000),
-    mediaCleanup: setInterval(() => undefined, 60_000),
+    startMediaCleanup: vi.fn(async () => undefined),
+    stopMediaCleanup: vi.fn(async () => "drained" as const),
     worktreeCleanup: setInterval(() => undefined, 60_000),
     skillCuratorCleanup: vi.fn(),
   };

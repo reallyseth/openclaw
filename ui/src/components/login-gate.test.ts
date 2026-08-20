@@ -12,7 +12,7 @@ type LoginGateElement = HTMLElement & {
 async function mountFailure(lastError: string, lastErrorCode: string | null) {
   const element = document.createElement("openclaw-login-gate") as LoginGateElement;
   element.props = {
-    basePath: "",
+    resourceBasePath: "",
     connected: false,
     lastError,
     lastErrorCode,
@@ -98,6 +98,22 @@ describe("login gate failure recovery", () => {
       "Run openclaw devices list on the Gateway host.",
       "Approve the pending browser/device request from that list.",
       "Reconnect after the approval completes.",
+    ]);
+  });
+
+  it("offers only supported recovery for an insecure browser context", async () => {
+    const element = await mountFailure(
+      "device identity required",
+      ConnectErrorDetailCodes.CONTROL_UI_DEVICE_IDENTITY_REQUIRED,
+    );
+
+    const steps = Array.from(
+      element.querySelectorAll<HTMLElement>(".login-gate__failure-steps li"),
+      (entry) => entry.textContent?.trim(),
+    );
+    expect(steps).toEqual([
+      "Use HTTPS/Tailscale Serve, or open http://127.0.0.1:18789 on the Gateway host.",
+      "Do not use a remote plain-HTTP URL; a token or password cannot replace browser device identity.",
     ]);
   });
 
