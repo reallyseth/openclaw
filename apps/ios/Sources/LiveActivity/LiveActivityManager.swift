@@ -28,7 +28,7 @@ final class LiveActivityManager {
     private let toolStaleRefreshDelay = Duration.seconds(240)
 
     private var arbiter = LiveActivityPresentationArbiter()
-    private var currentActivity: Activity<OpenClawActivityAttributes>?
+    private(set) var currentActivity: Activity<OpenClawActivityAttributes>?
     private var currentState: OpenClawActivityAttributes.ContentState?
     private var currentStaleDate: Date?
     private var pendingActivityUpdate: PendingActivityUpdate?

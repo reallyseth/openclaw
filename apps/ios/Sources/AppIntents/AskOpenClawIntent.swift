@@ -132,7 +132,12 @@ struct AskOpenClawIntent: AppIntent {
                     sessionKey: sessionKey,
                     agentName: agentName)
 
-                return .result(dialog: "I've sent that to OpenClaw. Check the Dynamic Island for updates.")
+                // ActivityKit only starts Live Activities from the foreground;
+                // when Siri launched us in the background the island can't appear.
+                let islandAvailable = LiveActivityManager.shared.currentActivity != nil
+                return .result(dialog: islandAvailable
+                    ? "I've sent that to OpenClaw. Check the Dynamic Island for updates."
+                    : "I've sent that to OpenClaw. Open the app to see the response.")
             }
         } catch {
             Self.logger.error("Siri intent send failed: \(error.localizedDescription, privacy: .public)")
