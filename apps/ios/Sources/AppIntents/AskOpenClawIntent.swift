@@ -23,6 +23,7 @@ struct AskOpenClawIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {
+        let intentStartedAt = Date.now
         guard let appModel = OpenClawAppModelRegistry.appModel else {
             return .result(dialog: "OpenClaw isn't running. Please open the app first.")
         }
@@ -90,10 +91,15 @@ struct AskOpenClawIntent: AppIntent {
                 runId: sendResponse.runId,
                 startedAt: .now))
 
-            // 4. Wait for run completion (8s budget for hybrid speak)
+            // 4. Wait for run completion. The hybrid speak window is
+            // adaptive: Siri aborts the intent session (~17s observed as
+            // NSCocoaErrorDomain 3072), so the total time from intent start
+            // must stay well inside that budget.
+            let elapsed = Date.now.timeIntervalSince(intentStartedAt)
+            let hybridMs = Int(max(2, 8 - elapsed) * 1000)
             let observation = await transport.waitForRunCompletion(
                 runId: sendResponse.runId,
-                timeoutMs: 8000)
+                timeoutMs: hybridMs)
 
             switch observation {
             case .terminal(.completed):
@@ -191,20 +197,31 @@ struct AskOpenClawIntent: AppIntent {
     {
         Task.detached {
             // The slow path outlives perform(); hold the gateway + island for
-            // as long as this poll runs (release happens on every branch).
+            // as long as this poll runs. Only a terminal observation or an
+            // exhausted budget releases the hold — cancellations (route
+            // changes / Siri aborting its intent session) are retried, since
+            // releasing early lets the background grace timer kill the
+            // gateway AND dismiss the island mid-query.
             await MainActor.run { appModel.beginSiriQueryHold() }
             defer { Task { @MainActor in appModel.endSiriQueryHold() } }
 
-            // Long-poll in bounded chunks (120s + 180s ≈ the Live Activity
-            // stale window) so slow runs keep the island alive instead of
-            // silently dismissing it at a single 120s timeout.
+            /// Retry loop: transient .unavailable (WebSocket route change,
+            /// cancellation) re-polls instead of giving up. Total budget ~5min
+            /// (the Live Activity stale window).
+            func isTerminal(_ observation: OpenClawChatRunObservation) -> Bool {
+                if case .terminal = observation { return true }
+                return false
+            }
+
             var observation = await transport.waitForRunCompletion(
                 runId: runId,
                 timeoutMs: 120_000)
-            if case .checkAgain = observation {
+            let retryDeadline = Date.now.addingTimeInterval(240)
+            while !isTerminal(observation), Date.now < retryDeadline {
+                try? await Task.sleep(for: .seconds(2))
                 observation = await transport.waitForRunCompletion(
                     runId: runId,
-                    timeoutMs: 180_000)
+                    timeoutMs: 120_000)
             }
 
             switch observation {
@@ -236,8 +253,8 @@ struct AskOpenClawIntent: AppIntent {
                     SiriQueryStore.clearPending()
                 }
             case .checkAgain, .unavailable:
-                // Still running (or unavailable) after the poll budget:
-                // keep the island honest rather than silently ending it.
+                // Still running after the full retry budget: keep the island
+                // honest rather than silently ending it.
                 await MainActor.run {
                     SiriLiveActivityBridge.shared.showQuerying(
                         message: "Still working — open the app",
