@@ -285,9 +285,10 @@ final class LiveActivityManager {
 
     private func reconcile(reason: String) {
         if reason.hasPrefix("siri") {
-            self.logger
-                .info(
-                    "reconcile reason=\(reason, privacy: .public) hasRequest=\(self.arbiter.current != nil, privacy: .public) activityActive=\(self.currentActivity?.activityState.rawValue ?? 99, privacy: .public)")
+            let hasRequest = self.arbiter.current != nil
+            let activityState = self.currentActivity.map { String(describing: $0.activityState) } ?? "none"
+            let summary = "reason=\(reason) hasRequest=\(hasRequest) activityState=\(activityState)"
+            self.logger.info("siri reconcile \(summary, privacy: .public)")
         }
         guard let request = arbiter.current else {
             self.endCurrentActivity(reason: reason)
