@@ -5,9 +5,9 @@ import Foundation
 /// Reads the most recent agent response aloud from SiriQueryStore.
 @available(iOS 18.0, *)
 struct ReadLastOpenClawResponseIntent: AppIntent {
-    static var title: LocalizedStringResource = "Read Last OpenClaw Response"
-    static var description = IntentDescription("Reads the most recent OpenClaw agent response")
-    static var openAppWhenRun: Bool = false
+    static let title: LocalizedStringResource = "Read Last OpenClaw Response"
+    static let description = IntentDescription("Reads the most recent OpenClaw agent response")
+    static let openAppWhenRun: Bool = false
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {
@@ -16,6 +16,6 @@ struct ReadLastOpenClawResponseIntent: AppIntent {
         }
 
         let spokenText = completed.fullResponse ?? completed.responsePreview
-        return .result(dialog: IntentDialog.string(spokenText))
+        return .result(dialog: IntentDialog(stringLiteral: spokenText))
     }
 }

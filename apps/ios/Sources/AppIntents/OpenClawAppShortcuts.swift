@@ -8,14 +8,16 @@ struct OpenClawAppShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         AppShortcut(
             intent: AskOpenClawIntent(),
+            // Note: AppShortcut phrases may only interpolate AppEntity/AppEnum
+            // parameters — free-form String params (message) cannot be extracted
+            // from the spoken phrase, so Siri prompts for them at runtime.
             phrases: [
-                "Ask \(.applicationName) to \(\.$message)",
-                "Tell \(.applicationName) to \(\.$message)",
-                "Send a message to \(.applicationName): \(\.$message)",
+                "Ask \(.applicationName)",
+                "Tell \(.applicationName)",
+                "Send a message to \(.applicationName)",
             ],
             shortTitle: "Ask OpenClaw",
-            systemImageName: "bubble.left"
-        )
+            systemImageName: "bubble.left")
 
         AppShortcut(
             intent: ReadLastOpenClawResponseIntent(),
@@ -24,7 +26,6 @@ struct OpenClawAppShortcuts: AppShortcutsProvider {
                 "Read the last \(.applicationName) response",
             ],
             shortTitle: "Read Last Response",
-            systemImageName: "speaker.wave.2"
-        )
+            systemImageName: "speaker.wave.2")
     }
 }

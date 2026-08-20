@@ -30,38 +30,36 @@ enum SiriQueryStore {
         static let lastResponse = "siri.lastResponse"
     }
 
-    private static let defaults: UserDefaults = .standard
-
     static var pending: PendingQuery? {
-        guard let data = defaults.data(forKey: Key.pending) else { return nil }
+        guard let data = UserDefaults.standard.data(forKey: Key.pending) else { return nil }
         return try? JSONDecoder().decode(PendingQuery.self, from: data)
     }
 
     static var lastResponse: CompletedQuery? {
-        guard let data = defaults.data(forKey: Key.lastResponse) else { return nil }
+        guard let data = UserDefaults.standard.data(forKey: Key.lastResponse) else { return nil }
         return try? JSONDecoder().decode(CompletedQuery.self, from: data)
     }
 
     static func setPending(_ query: PendingQuery) {
         do {
             let data = try JSONEncoder().encode(query)
-            defaults.set(data, forKey: Key.pending)
+            UserDefaults.standard.set(data, forKey: Key.pending)
         } catch {
-            logger.error("Failed to encode pending query: \(error.localizedDescription, privacy: .public)")
+            self.logger.error("Failed to encode pending query: \(error.localizedDescription, privacy: .public)")
         }
     }
 
     static func complete(_ query: CompletedQuery) {
         do {
             let data = try JSONEncoder().encode(query)
-            defaults.set(data, forKey: Key.lastResponse)
+            UserDefaults.standard.set(data, forKey: Key.lastResponse)
         } catch {
-            logger.error("Failed to encode completed query: \(error.localizedDescription, privacy: .public)")
+            self.logger.error("Failed to encode completed query: \(error.localizedDescription, privacy: .public)")
         }
-        clearPending()
+        self.clearPending()
     }
 
     static func clearPending() {
-        defaults.removeObject(forKey: Key.pending)
+        UserDefaults.standard.removeObject(forKey: Key.pending)
     }
 }

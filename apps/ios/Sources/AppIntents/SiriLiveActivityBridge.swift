@@ -19,8 +19,8 @@ final class SiriLiveActivityBridge {
         agentName: String,
         sessionKey: String)
     {
-        dismissTask?.cancel()
-        dismissTask = nil
+        self.dismissTask?.cancel()
+        self.dismissTask = nil
 
         LiveActivityManager.shared.showSiriQuery(
             message: preview,
@@ -40,7 +40,7 @@ final class SiriLiveActivityBridge {
             sessionKey: sessionKey)
 
         // Auto-dismiss after 10 seconds so the Live Activity doesn't linger
-        dismissTask = Task { [weak self] in
+        self.dismissTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(10))
             guard !Task.isCancelled else { return }
             self?.end()
@@ -49,8 +49,8 @@ final class SiriLiveActivityBridge {
 
     /// Dismisses the Siri Live Activity immediately.
     func end() {
-        dismissTask?.cancel()
-        dismissTask = nil
+        self.dismissTask?.cancel()
+        self.dismissTask = nil
         LiveActivityManager.shared.endSiriActivity()
     }
 }

@@ -12,9 +12,9 @@ import os
 /// the Dynamic Island for updates.
 @available(iOS 18.0, *)
 struct AskOpenClawIntent: AppIntent {
-    static var title: LocalizedStringResource = "Ask OpenClaw"
-    static var description = IntentDescription("Send a message to your OpenClaw agent")
-    static var openAppWhenRun: Bool = false
+    static let title: LocalizedStringResource = "Ask OpenClaw"
+    static let description = IntentDescription("Send a message to your OpenClaw agent")
+    static let openAppWhenRun: Bool = false
 
     @Parameter(title: "Message")
     var message: String
@@ -45,7 +45,7 @@ struct AskOpenClawIntent: AppIntent {
         let queryID = UUID()
         let pending = SiriQueryStore.PendingQuery(
             id: queryID,
-            message: message,
+            message: self.message,
             sessionKey: sessionKey,
             agentID: agentID,
             runId: nil,
@@ -54,7 +54,7 @@ struct AskOpenClawIntent: AppIntent {
 
         // 2. Start Live Activity
         SiriLiveActivityBridge.shared.showQuerying(
-            message: message,
+            message: self.message,
             agentName: agentName,
             sessionKey: sessionKey)
 
@@ -62,7 +62,7 @@ struct AskOpenClawIntent: AppIntent {
         do {
             let sendResponse = try await transport.sendMessage(
                 sessionKey: sessionKey,
-                message: message,
+                message: self.message,
                 thinking: "",
                 idempotencyKey: idempotencyKey,
                 attachments: [])
@@ -70,7 +70,7 @@ struct AskOpenClawIntent: AppIntent {
             // Update pending with runId
             SiriQueryStore.setPending(SiriQueryStore.PendingQuery(
                 id: queryID,
-                message: message,
+                message: self.message,
                 sessionKey: sessionKey,
                 agentID: agentID,
                 runId: sendResponse.runId,
@@ -99,15 +99,15 @@ struct AskOpenClawIntent: AppIntent {
 
                 SiriQueryStore.complete(SiriQueryStore.CompletedQuery(
                     id: queryID,
-                    message: message,
+                    message: self.message,
                     responsePreview: truncatedPreview,
                     fullResponse: preview,
                     sessionKey: sessionKey,
                     completedAt: .now))
 
-                return .result(dialog: IntentDialog.string(spokenText))
+                return .result(dialog: IntentDialog(stringLiteral: spokenText))
 
-            case .terminal(.failed(let failureMessage)):
+            case let .terminal(.failed(failureMessage)):
                 SiriLiveActivityBridge.shared.end()
                 SiriQueryStore.clearPending()
                 return .result(dialog: "OpenClaw encountered an error: \(failureMessage)")
@@ -118,7 +118,7 @@ struct AskOpenClawIntent: AppIntent {
                     transport: transport,
                     runId: sendResponse.runId,
                     queryID: queryID,
-                    message: message,
+                    message: self.message,
                     sessionKey: sessionKey,
                     agentName: agentName)
 
@@ -160,13 +160,14 @@ struct AskOpenClawIntent: AppIntent {
 
     /// Starts a detached task that continues long-polling for up to 120 seconds.
     /// When the run completes, it updates the Live Activity and SiriQueryStore.
-    nonisolated private static func startDetachedLongPoll(
+    private nonisolated static func startDetachedLongPoll(
         transport: any OpenClawChatTransport,
         runId: String,
         queryID: UUID,
         message: String,
         sessionKey: String,
-        agentName: String) {
+        agentName: String)
+    {
         Task.detached {
             let observation = await transport.waitForRunCompletion(
                 runId: runId,
